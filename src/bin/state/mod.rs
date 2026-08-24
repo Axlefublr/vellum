@@ -249,6 +249,14 @@ impl State {
         self.draw.is_editing_text()
     }
 
+    pub fn is_toggle_eraser_disabled(&self) -> bool {
+        self.draw.is_toggle_eraser_disabled()
+    }
+
+    pub fn is_toggle_radial_disabled(&self) -> bool {
+        self.draw.is_toggle_radial_disabled()
+    }
+
     pub fn set_input_active(&mut self, active: bool) {
         if active == self.active {
             return;

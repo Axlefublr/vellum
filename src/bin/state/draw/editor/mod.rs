@@ -82,15 +82,20 @@ pub struct Editor {
     last_non_eraser_tool: Tool,
     tool_properties: ToolPropertySet,
     default_tool_properties: ToolPropertySet,
+    disable_toggle_eraser: bool,
+    disable_toggle_radial: bool,
     remember_last_tool: bool,
     palette: Vec<[f32; 3]>,
 }
 
 impl Editor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         width: f32,
         rgb: crate::Rgb,
         default_tool: Tool,
+        disable_toggle_eraser: bool,
+        disable_toggle_radial: bool,
         remember_last_tool: bool,
         default_fill_shapes: bool,
         tool_defaults: &crate::config::ToolDefaults,
@@ -133,6 +138,8 @@ impl Editor {
             },
             tool_properties,
             default_tool_properties,
+            disable_toggle_eraser,
+            disable_toggle_radial,
             remember_last_tool,
             palette,
         }
@@ -167,6 +174,14 @@ impl Editor {
 
     pub fn is_editing_text(&self) -> bool {
         matches!(self.interaction, Some(Interaction::EditingText(_)))
+    }
+
+    pub fn is_toggle_eraser_disabled(&self) -> bool {
+        self.disable_toggle_eraser
+    }
+
+    pub fn is_toggle_radial_disabled(&self) -> bool {
+        self.disable_toggle_radial
     }
 
     pub fn is_drawing_pen(&self) -> bool {
