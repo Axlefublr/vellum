@@ -21,6 +21,7 @@ struct FileConfig {
     feedback_duration_ms: Option<u64>,
     clear_on_escape: Option<bool>,
     default_fill_shapes: Option<bool>,
+    font: Option<String>,
     #[serde(default)]
     tools: ToolDefaults,
 }
@@ -92,6 +93,7 @@ pub(super) struct Settings {
     pub(super) clear_on_escape: bool,
     pub(super) default_fill_shapes: bool,
     pub(super) tool_defaults: ToolDefaults,
+    pub(super) font: Option<String>,
 }
 
 impl Settings {
@@ -137,6 +139,8 @@ impl Settings {
             None => palette[0],
         };
 
+        let font = file.font;
+
         let feedback_duration_ms = file.feedback_duration_ms.unwrap_or(500);
         if feedback_duration_ms > 60_000 {
             return Err("feedback_duration_ms must not exceed 60000".into());
@@ -154,6 +158,7 @@ impl Settings {
             clear_on_escape: file.clear_on_escape.unwrap_or(false),
             default_fill_shapes: file.default_fill_shapes.unwrap_or(false),
             tool_defaults: file.tools,
+            font,
         })
     }
 }

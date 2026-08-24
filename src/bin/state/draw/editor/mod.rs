@@ -81,9 +81,11 @@ pub struct Editor {
     default_tool_properties: ToolPropertySet,
     remember_last_tool: bool,
     palette: Vec<[f32; 3]>,
+    font: Option<String>,
 }
 
 impl Editor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         width: f32,
         rgb: crate::Rgb,
@@ -92,6 +94,7 @@ impl Editor {
         default_fill_shapes: bool,
         tool_defaults: &crate::config::ToolDefaults,
         palette: Vec<crate::Rgb>,
+        font: Option<String>,
     ) -> Self {
         let width = width.clamp(MIN_STROKE_WIDTH, MAX_STROKE_WIDTH);
         let default_tool_properties =
@@ -132,6 +135,7 @@ impl Editor {
             default_tool_properties,
             remember_last_tool,
             palette,
+            font,
         }
     }
 

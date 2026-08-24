@@ -91,6 +91,7 @@ impl DrawState {
                 settings.default_fill_shapes,
                 &settings.tool_defaults,
                 settings.palette,
+                settings.font,
             ),
             damage: Damage::Scene,
             feedback: None,
