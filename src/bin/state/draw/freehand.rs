@@ -8,6 +8,7 @@ const MIN_SAMPLE_DISTANCE_SQUARED: f32 = 1.0;
 const STAMP_DIRECTION_LENGTH: f32 = 0.01;
 const SNAP_ANGLE: f32 = std::f32::consts::PI / 12.0;
 const CHUNK_POINTS: usize = 2048;
+const MAX_SKIPPED_JOIN_DEPTH: f64 = 0.1;
 // Keeping the centerline point and raw index lets the rolling tail resume
 // perfect_freehand exactly.
 #[derive(Debug)]
@@ -46,6 +47,31 @@ impl LiveStroke {
     }
 
     pub fn push(&mut self, point: Point, snap: bool) -> bool {
+        self.push_with_follow(point, snap, STABILIZER_FOLLOW)
+    }
+
+    pub fn push_batch(&mut self, points: &[Point], snap: bool) -> bool {
+        let [first, rest @ ..] = points else {
+            return false;
+        };
+        let Some(&last) = rest.last() else {
+            return self.push(*first, snap);
+        };
+        debug_assert_eq!(points.len(), 2);
+        let follow = 1.0 - (1.0 - STABILIZER_FOLLOW).sqrt();
+        let first_changed = self.push_with_follow(*first, snap, follow);
+        self.push_with_follow(
+            last,
+            snap,
+            if first_changed {
+                follow
+            } else {
+                STABILIZER_FOLLOW
+            },
+        ) | first_changed
+    }
+
+    fn push_with_follow(&mut self, point: Point, snap: bool, follow: f32) -> bool {
         let point = point + self.alignment_offset;
         if !self.direction_locked {
             if !self.direction_is_ready(point) {
@@ -62,8 +88,7 @@ impl LiveStroke {
             return false;
         }
         let target = point - offset * (delay / distance);
-        self.stabilized_point =
-            self.stabilized_point + (target - self.stabilized_point) * STABILIZER_FOLLOW;
+        self.stabilized_point = self.stabilized_point + (target - self.stabilized_point) * follow;
         let changed = push(
             &mut self.points,
             &mut self.sample_anchor,
@@ -469,6 +494,11 @@ fn append_round_join(
     let outgoing = outgoing / outgoing_length;
     let turn = incoming.cross(outgoing).atan2(incoming.dot(outgoing));
     if turn.abs() <= f64::EPSILON || (std::f64::consts::PI - turn.abs()) <= f64::EPSILON {
+        return;
+    }
+    // Adjacent segment rectangles leave an outer wedge this deep. Antialiasing
+    // covers a subpixel wedge without needing a separate arc subpath.
+    if radius * ((turn * 0.5).cos().recip() - 1.0) <= MAX_SKIPPED_JOIN_DEPTH {
         return;
     }
 
