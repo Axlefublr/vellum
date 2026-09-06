@@ -8,7 +8,9 @@ mod text_edit;
 mod tool;
 mod triangle;
 
-use crate::render::{FillRule, Geometry, LocalGeometry, TextSpec, WgpuState, text_line_height};
+use crate::render::{
+    FillRule, Geometry, LocalGeometry, TextSpec, Viewport, WgpuState, text_line_height,
+};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -359,6 +361,7 @@ impl DrawState {
         &mut self,
         output: OutputId,
         origin: Point,
+        scale: [f64; 2],
         wgpu: &mut WgpuState,
         before_present: impl FnOnce(Option<TextInputSnapshot<'_>>),
     ) {
@@ -482,7 +485,10 @@ impl DrawState {
         if wgpu.render(
             &self.previews,
             self.picker.as_ref(),
-            [origin.x, origin.y],
+            Viewport {
+                origin: [origin.x, origin.y],
+                scale,
+            },
             &text_specs,
             self.editor
                 .active_text()
@@ -600,6 +606,7 @@ fn text_cursor_rectangle(
     [scale_x, scale_y]: [f32; 2],
     output_origin: Point,
 ) -> [i32; 4] {
+    // Text-input rectangles use logical surface coordinates, before buffer scaling.
     let x0 = text_origin.x + area.x0 as f32 * scale_x - output_origin.x;
     let y0 = text_origin.y + area.y0 as f32 * scale_y - output_origin.y;
     let x1 = text_origin.x + area.x1 as f32 * scale_x - output_origin.x;

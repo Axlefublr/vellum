@@ -14,6 +14,11 @@ use wgpu::util::DeviceExt;
 
 const PICKER_RENDER_SCALE: u32 = 2;
 
+pub struct Viewport {
+    pub origin: [f32; 2],
+    pub scale: [f64; 2],
+}
+
 struct PickerTarget {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -345,11 +350,15 @@ impl WgpuState {
         &mut self,
         previews: &[Geometry],
         picker: Option<&LocalGeometry>,
-        viewport_origin: [f32; 2],
+        viewport: Viewport,
         text_specs: &[TextSpec<'_>],
         active_text: Option<(u64, &parley::Layout<()>)>,
         before_present: impl FnOnce(),
     ) -> bool {
+        let Viewport {
+            origin: viewport_origin,
+            scale,
+        } = viewport;
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(output)
             | wgpu::CurrentSurfaceTexture::Suboptimal(output) => output,
@@ -380,10 +389,13 @@ impl WgpuState {
             return false;
         };
         self.main_scene.reset_and_resize(main_size[0], main_size[1]);
-        self.main_scene.set_transform(Affine::translate((
-            -f64::from(viewport_origin[0]),
-            -f64::from(viewport_origin[1]),
-        )));
+        self.main_scene.set_transform(
+            Affine::scale_non_uniform(scale[0], scale[1])
+                * Affine::translate((
+                    -f64::from(viewport_origin[0]),
+                    -f64::from(viewport_origin[1]),
+                )),
+        );
         let target_is_srgb = self.surface_config.format.is_srgb();
         replay_geometry(&mut self.main_scene, &self.committed, target_is_srgb);
         let mut encoder = self
@@ -408,23 +420,27 @@ impl WgpuState {
 
         let picker_origin = picker.map_or([0.0; 2], |picker| {
             [
-                picker.origin[0] - viewport_origin[0],
-                picker.origin[1] - viewport_origin[1],
+                (f64::from(picker.origin[0] - viewport_origin[0]) * scale[0]) as f32,
+                (f64::from(picker.origin[1] - viewport_origin[1]) * scale[1]) as f32,
             ]
         });
         let picker_size = if let Some(picker) = picker {
-            let Some(scene_size) = checked_picker_scene_size(picker.size) else {
+            let size = [
+                (f64::from(picker.size[0]) * scale[0]).ceil() as u32,
+                (f64::from(picker.size[1]) * scale[1]).ceil() as u32,
+            ];
+            let Some(scene_size) = checked_picker_scene_size(size) else {
                 return false;
             };
             if self
                 .picker_target
                 .as_ref()
-                .is_none_or(|target| target.size != picker.size)
+                .is_none_or(|target| target.size != size)
             {
                 self.picker_target = PickerTarget::new(
                     &self.device,
                     self.surface_config.format,
-                    picker.size,
+                    size,
                     picker_origin,
                     &self.picker_composite_layout,
                 );
@@ -449,8 +465,10 @@ impl WgpuState {
 
         if let (Some(picker), Some(size)) = (picker, picker_size) {
             self.picker_scene.reset_and_resize(size[0], size[1]);
-            self.picker_scene
-                .set_transform(Affine::scale(f64::from(PICKER_RENDER_SCALE)));
+            self.picker_scene.set_transform(
+                Affine::scale(f64::from(PICKER_RENDER_SCALE))
+                    * Affine::scale_non_uniform(scale[0], scale[1]),
+            );
             replay_geometry(&mut self.picker_scene, &picker.geometry, target_is_srgb);
         }
 
@@ -494,10 +512,10 @@ impl WgpuState {
             }
             let left = picker_origin[0].max(0.0);
             let top = picker_origin[1].max(0.0);
-            let right =
-                (picker_origin[0] + picker.size[0] as f32).min(self.surface_config.width as f32);
-            let bottom =
-                (picker_origin[1] + picker.size[1] as f32).min(self.surface_config.height as f32);
+            let right = (picker_origin[0] + picker.size[0] as f32 * scale[0] as f32)
+                .min(self.surface_config.width as f32);
+            let bottom = (picker_origin[1] + picker.size[1] as f32 * scale[1] as f32)
+                .min(self.surface_config.height as f32);
             if right > left && bottom > top {
                 self.composite_picker(
                     &mut encoder,

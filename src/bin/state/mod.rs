@@ -28,8 +28,12 @@ use wayland_client::protocol::wl_surface::WlSurface;
 
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1;
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
+use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_manager_v2::ZwpTabletManagerV2;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2;
@@ -169,11 +173,11 @@ impl State {
         let qhandle = event_queue.handle();
         let display = connection.display();
         let compositor = globals
-            .bind::<WlCompositor, _, _>(&qhandle, 1..=5, ())
-            .map_err(|_| "compositor does not provide wl_compositor")?;
+            .bind::<WlCompositor, _, _>(&qhandle, 3..=6, ())
+            .map_err(|_| "compositor does not provide wl_compositor version 3 or newer")?;
         let seat = globals
-            .bind::<WlSeat, _, _>(&qhandle, 1..=9, ())
-            .map_err(|_| "compositor does not provide wl_seat")?;
+            .bind::<WlSeat, _, _>(&qhandle, 5..=9, ())
+            .map_err(|_| "compositor does not provide wl_seat version 5 or newer")?;
         let layer_shell = globals
             .bind::<ZwlrLayerShellV1, _, _>(&qhandle, 1..=4, ())
             .map_err(|_| "compositor does not provide zwlr_layer_shell_v1")?;
@@ -186,6 +190,12 @@ impl State {
         let xdg_output_manager = globals
             .bind::<ZxdgOutputManagerV1, _, _>(&qhandle, 1..=3, ())
             .ok();
+        let viewporter = globals.bind::<WpViewporter, _, _>(&qhandle, 1..=1, ()).ok();
+        let fractional_scale_manager = viewporter.as_ref().and_then(|_| {
+            globals
+                .bind::<WpFractionalScaleManagerV1, _, _>(&qhandle, 1..=1, ())
+                .ok()
+        });
         let text_input = globals
             .bind::<ZwpTextInputManagerV3, _, _>(&qhandle, 1..=2, ())
             .ok()
@@ -220,6 +230,8 @@ impl State {
                 cursor_shape_manager,
                 tablet_manager,
                 xdg_output_manager,
+                viewporter,
+                fractional_scale_manager,
             },
             draw: draw::DrawState::new(settings),
             keyboard: input::KeyboardState::default(),
@@ -264,6 +276,18 @@ impl State {
             .as_ref()
             .map(|manager| manager.get_xdg_output(&output, &self.qhandle, id));
         let surface = self.wayland.compositor.create_surface(&self.qhandle, id);
+        let fractional_scale = self
+            .wayland
+            .fractional_scale_manager
+            .as_ref()
+            .map(|manager| manager.get_fractional_scale(&surface, &self.qhandle, id));
+        let viewport = fractional_scale.as_ref().map(|_| {
+            self.wayland
+                .viewporter
+                .as_ref()
+                .unwrap()
+                .get_viewport(&surface, &self.qhandle, ())
+        });
         let layer_surface = self.wayland.layer_shell.get_layer_surface(
             &surface,
             Some(&output),
@@ -286,6 +310,11 @@ impl State {
                 output,
                 xdg_output,
                 origin: Point::default(),
+                logical_size: [0; 2],
+                integer_scale: 1,
+                preferred_scale: None,
+                fractional_scale,
+                viewport,
                 surface,
                 layer_surface,
                 frame_pending: false,
@@ -306,6 +335,12 @@ impl State {
             return;
         };
         output.wgpu.take();
+        if let Some(scale) = output.fractional_scale {
+            scale.destroy();
+        }
+        if let Some(viewport) = output.viewport {
+            viewport.destroy();
+        }
         if let Some(xdg_output) = output.xdg_output {
             xdg_output.destroy();
         }
@@ -488,18 +523,36 @@ impl State {
     }
 
     fn render(&mut self, output: OutputId) {
-        if let Some(output_state) = self.wayland.outputs.get_mut(&output)
-            && let Some(wgpu) = output_state.wgpu.as_mut()
-        {
+        if let Some(output_state) = self.wayland.outputs.get_mut(&output) {
+            let scale = output_state.render_scale();
+            let Some(wgpu) = output_state.wgpu.as_mut() else {
+                return;
+            };
             let text_input = &mut self.text_input;
             let proxy = self.wayland.text_input.as_ref();
             self.draw
-                .render(output, output_state.origin, wgpu, |snapshot| {
+                .render(output, output_state.origin, scale, wgpu, |snapshot| {
                     text_input.sync_render(proxy, output, snapshot);
                 });
             if !self.active {
                 wgpu.release_picker_target();
             }
+        }
+    }
+
+    fn resize_output(&mut self, id: OutputId) {
+        let Some(output) = self.wayland.outputs.get_mut(&id) else {
+            return;
+        };
+        if output.logical_size.contains(&0) {
+            return;
+        }
+        output.configure_scale();
+        let [width, height] = output.buffer_size();
+        if let Some(wgpu) = &mut output.wgpu {
+            wgpu.resize(width, height);
+            self.draw.damage_scene(id);
+            self.request_render();
         }
     }
 
@@ -776,21 +829,60 @@ struct WaylandState {
     cursor_shape_manager: Option<WpCursorShapeManagerV1>,
     tablet_manager: Option<ZwpTabletManagerV2>,
     xdg_output_manager: Option<ZxdgOutputManagerV1>,
+    viewporter: Option<WpViewporter>,
+    fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
 }
 
 struct Output {
     output: WlOutput,
     xdg_output: Option<ZxdgOutputV1>,
     origin: Point,
+    logical_size: [u32; 2],
+    integer_scale: i32,
+    preferred_scale: Option<u32>,
+    fractional_scale: Option<WpFractionalScaleV1>,
+    viewport: Option<WpViewport>,
     surface: WlSurface,
     layer_surface: ZwlrLayerSurfaceV1,
     frame_pending: bool,
     wgpu: Option<WgpuState>,
 }
 
+impl Output {
+    fn buffer_size(&self) -> [u32; 2] {
+        let scale = self
+            .preferred_scale
+            .map_or(f64::from(self.integer_scale), |scale| {
+                f64::from(scale) / 120.0
+            });
+        self.logical_size
+            .map(|size| (f64::from(size) * scale).round() as u32)
+    }
+
+    fn render_scale(&self) -> [f64; 2] {
+        let size = self.buffer_size();
+        [
+            f64::from(size[0]) / f64::from(self.logical_size[0]),
+            f64::from(size[1]) / f64::from(self.logical_size[1]),
+        ]
+    }
+
+    fn configure_scale(&self) {
+        if let Some(viewport) = &self.viewport {
+            self.surface.set_buffer_scale(1);
+            viewport.set_destination(self.logical_size[0] as i32, self.logical_size[1] as i32);
+        } else {
+            self.surface.set_buffer_scale(self.integer_scale);
+        }
+    }
+}
+
 delegate_noop!(WlCompositor);
 delegate_noop!(WlRegion);
 delegate_noop!(ZwpTextInputManagerV3);
+delegate_noop!(WpViewporter);
+delegate_noop!(WpViewport);
+delegate_noop!(WpFractionalScaleManagerV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
     fn event(
@@ -824,6 +916,12 @@ impl Dispatch<WlOutput, OutputId> for State {
         _qhandle: &QueueHandle<Self>,
     ) {
         use wayland_client::protocol::wl_output::Event;
+        if let Event::Scale { factor } = event {
+            if let Some(output) = state.wayland.outputs.get_mut(output) {
+                output.integer_scale = factor.max(1);
+            }
+            state.resize_output(*output);
+        }
         if let Event::Geometry { x, y, .. } = event
             && state
                 .wayland
@@ -837,6 +935,24 @@ impl Dispatch<WlOutput, OutputId> for State {
 }
 
 delegate_noop!(ZxdgOutputManagerV1);
+
+impl Dispatch<WpFractionalScaleV1, OutputId> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpFractionalScaleV1,
+        event: <WpFractionalScaleV1 as Proxy>::Event,
+        output: &OutputId,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        if let wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            if let Some(output) = state.wayland.outputs.get_mut(output) {
+                output.preferred_scale = Some(scale.max(1));
+            }
+            state.resize_output(*output);
+        }
+    }
+}
 
 impl Dispatch<ZxdgOutputV1, OutputId> for State {
     fn event(
@@ -895,9 +1011,7 @@ impl Dispatch<WlSeat, ()> for State {
         } else if !capabilities.contains(Capability::Pointer)
             && let Some(pointer) = state.wayland.pointer.take()
         {
-            if pointer.version() >= 3 {
-                pointer.release();
-            }
+            pointer.release();
             state.pointer.clear_pointer();
             state.refresh_pointer_cursor();
         }
@@ -907,9 +1021,7 @@ impl Dispatch<WlSeat, ()> for State {
             && let Some(keyboard) = state.wayland.keyboard.take()
         {
             state.keyboard.clear();
-            if keyboard.version() >= 3 {
-                keyboard.release();
-            }
+            keyboard.release();
         }
     }
 }
@@ -954,11 +1066,15 @@ impl Dispatch<ZwlrLayerSurfaceV1, OutputId> for State {
                 let Some(output_state) = state.wayland.outputs.get_mut(output) else {
                     return;
                 };
-                if let Some(wgpu) = &mut output_state.wgpu {
-                    wgpu.resize(width, height);
-                    state.draw.damage_scene(*output);
-                    state.request_render();
+                if width == 0 || height == 0 {
+                    return;
+                }
+                output_state.logical_size = [width, height];
+                if output_state.wgpu.is_some() {
+                    state.resize_output(*output);
                 } else {
+                    output_state.configure_scale();
+                    let [width, height] = output_state.buffer_size();
                     let surface = output_state.surface.clone();
                     let display = state.wayland.display.clone();
                     let wgpu = if let Some(gpu) = &state.gpu {
