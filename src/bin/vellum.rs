@@ -16,7 +16,7 @@ mod state;
 
 use cli::{Cli, Command};
 use config::Settings;
-use protocol::CONTROL_SOCKET;
+use protocol::{CONTROL_SOCKET, ControlSocket};
 
 const MAX_SOCKET_MESSAGE: usize = 4096;
 pub(crate) type Rgba = [f32; 4];
@@ -130,13 +130,8 @@ fn query(request: Command) -> Result<bool, String> {
 
 fn run_overlay(settings: Settings) -> Result<(), String> {
     render::init_text_font(settings.text_font.clone());
-    let socket_addr = SocketAddr::from_abstract_name(CONTROL_SOCKET)
-        .map_err(|error| format!("invalid control socket name: {error}"))?;
-    let socket = UnixDatagram::bind_addr(&socket_addr)
-        .map_err(|error| format!("could not bind control socket: {error}"))?;
-    socket
-        .set_nonblocking(true)
-        .map_err(|error| format!("could not configure control socket: {error}"))?;
+    let control = ControlSocket::bind()?;
+    let socket = &control.socket;
 
     let (mut state, mut event_queue) = state::State::setup_wayland(settings)?;
     state.deactivate();
@@ -173,7 +168,7 @@ fn run_overlay(settings: Settings) -> Result<(), String> {
                             PollFlags::empty()
                         },
                 ),
-                PollFd::new(&socket, PollFlags::IN),
+                PollFd::new(socket, PollFlags::IN),
             ];
             if let Err(error) = poll(&mut fds, timeout.as_ref()) {
                 if error == rustix::io::Errno::INTR {
@@ -197,8 +192,9 @@ fn run_overlay(settings: Settings) -> Result<(), String> {
         if socket_ready {
             let mut message = [0; MAX_SOCKET_MESSAGE + 1];
             loop {
-                let (size, sender) = match socket.recv_from(&mut message) {
-                    Ok(message) => message,
+                let (size, sender) = match control.recv(&mut message) {
+                    Ok(Some(message)) => message,
+                    Ok(None) => continue,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(error) => return Err(format!("socket read failed: {error}")),
                 };
@@ -223,19 +219,20 @@ fn run_overlay(settings: Settings) -> Result<(), String> {
                         state.set_input_active(false);
                     }
                     Command::SetColor { color } => state.set_current_color(color),
-                    Command::IsActive => {
-                        let response: &[u8] = if state.is_active() { b"true" } else { b"false" };
-                        if let Err(error) = socket.send_to_addr(response, &sender) {
-                            eprintln!("vellum: could not send status: {error}");
-                        }
-                    }
-                    Command::IsTextEditing => {
-                        let response: &[u8] = if state.is_text_editing() {
-                            b"true"
-                        } else {
-                            b"false"
+                    Command::IsActive | Command::IsTextEditing => {
+                        let active = match command {
+                            Command::IsActive => state.is_active(),
+                            _ => state.is_text_editing(),
                         };
-                        if let Err(error) = socket.send_to_addr(response, &sender) {
+                        let response: &[u8] = if active { b"true" } else { b"false" };
+                        if let Some(sender) = &sender
+                            && let Err(error) = rustix::net::sendto(
+                                socket,
+                                response,
+                                rustix::net::SendFlags::empty(),
+                                sender,
+                            )
+                        {
                             eprintln!("vellum: could not send status: {error}");
                         }
                     }
