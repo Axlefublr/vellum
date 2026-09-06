@@ -428,7 +428,12 @@ pub(super) fn bounds_for(kind: &ElementKind, style: Style) -> Bounds {
     bounds.expanded(expansion)
 }
 
-fn text_bounds(origin: Point, [width, height]: [f32; 2], style: Style, scale: [f32; 2]) -> Bounds {
+pub(super) fn text_bounds(
+    origin: Point,
+    [width, height]: [f32; 2],
+    style: Style,
+    scale: [f32; 2],
+) -> Bounds {
     let [[min_x, min_y], [max_x, max_y]] = crate::render::text_bounds(
         [origin.x, origin.y],
         [width, height],

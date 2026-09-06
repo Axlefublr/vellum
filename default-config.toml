@@ -52,6 +52,9 @@ opacity = 1.0
 filled = false
 
 [tools.text]
+font_family = "sans-serif"
+font_weight = 400
+font_style = "normal"
 size = 16.0
 size_range.min = 8.0
 size_range.max = 500.0

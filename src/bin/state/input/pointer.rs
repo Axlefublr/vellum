@@ -50,7 +50,7 @@ pub(in crate::state) struct PointerState {
     right_press_time: Option<u32>,
     middle_press: Option<(u32, (f64, f64))>,
     middle_dragging: bool,
-    last_left_click: Option<(u32, (f64, f64))>,
+    last_left_click: Option<(u32, (f64, f64), u8)>,
     scroll_remainder: f64,
     wheel_acceleration: WheelAcceleration,
     scroll_stop: Option<ScrollStop>,
@@ -326,23 +326,22 @@ impl Dispatch<WlPointer, (), State> for PointerState {
             if left_pressed && let Some(pos) = state.pointer.position {
                 state.pointer.left_press_pos = Some(pos);
                 state.pointer.left_button_in_picker = state.draw.picker_active();
-                let double_click = !state.pointer.left_button_in_picker
-                    && sequence.left_press_time.is_some_and(|time| {
-                        state
-                            .pointer
-                            .last_left_click
-                            .is_some_and(|(previous, previous_pos)| {
-                                time.wrapping_sub(previous) <= 400
-                                    && distance_squared(pos, previous_pos) <= CLICK_SLOP_SQUARED
-                            })
-                    });
-                if !double_click || !state.double_click_at(pos) {
+                let clicks = sequence
+                    .left_press_time
+                    .zip(state.pointer.last_left_click)
+                    .filter(|(time, (previous, previous_pos, _))| {
+                        !state.pointer.left_button_in_picker
+                            && !modifiers.shift
+                            && !modifiers.ctrl
+                            && time.wrapping_sub(*previous) <= 400
+                            && distance_squared(pos, *previous_pos) <= CLICK_SLOP_SQUARED
+                    })
+                    .map_or(1, |(_, (_, _, count))| count % 3 + 1);
+                if clicks == 1 || !state.text_click_at(pos, clicks) {
                     state.pointer_down(pos, modifiers, ToolOverride::None);
                 }
-                state.pointer.last_left_click = sequence
-                    .left_press_time
-                    .map(|time| (time, pos))
-                    .filter(|_| !double_click);
+                state.pointer.last_left_click =
+                    sequence.left_press_time.map(|time| (time, pos, clicks));
             }
             if right_pressed && let Some(pos) = state.pointer.position {
                 state.pointer.right_press_time = sequence.right_button_time;

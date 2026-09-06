@@ -19,6 +19,7 @@ use self::editor::{Damage, Editor, EditorEffect};
 use self::scene::ElementKind;
 pub(super) use self::scene::Point;
 pub(crate) use self::selection::CursorHint;
+use self::text_edit::TextEdit;
 pub(crate) use self::tool::Tool;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -151,12 +152,8 @@ impl DrawState {
             self.feedback = Some((label, at));
             self.feedback_until = Some(Instant::now() + self.feedback_duration);
         }
-        if self.editor.is_editing_text() {
-            if self.show_caret() {
-                effect.damage = effect.damage.max(Damage::Preview);
-            }
-        } else {
-            self.caret_until = None;
+        if self.show_caret() {
+            effect.damage = effect.damage.max(Damage::Preview);
         }
         self.record(effect.damage);
         effect
@@ -176,17 +173,18 @@ impl DrawState {
         modifiers: Modifiers,
         tool_override: ToolOverride,
     ) -> bool {
-        let damage = self.editor.pointer_down(point, modifiers, tool_override);
-        if self.editor.is_editing_text() {
-            self.show_caret();
-        } else {
-            self.caret_until = None;
+        let mut damage = self.editor.pointer_down(point, modifiers, tool_override);
+        if self.show_caret() {
+            damage = damage.max(Damage::Preview);
         }
         self.record(damage)
     }
 
     pub fn pointer_motion(&mut self, point: Point, modifiers: Modifiers) -> bool {
         let damage = self.editor.pointer_motion(point, modifiers);
+        if damage.changed() {
+            self.show_caret();
+        }
         self.record(damage)
     }
 
@@ -202,6 +200,9 @@ impl DrawState {
 
     pub fn pointer_up(&mut self, point: Point, modifiers: Modifiers) -> bool {
         let damage = self.editor.pointer_up(point, modifiers);
+        if damage.changed() {
+            self.show_caret();
+        }
         self.record(damage)
     }
 
@@ -242,11 +243,9 @@ impl DrawState {
         self.record(damage)
     }
 
-    pub fn double_click_at(&mut self, point: Point) -> bool {
-        let damage = self.editor.double_click_at(point);
-        if self.editor.is_editing_text() {
-            self.show_caret();
-        }
+    pub fn text_click_at(&mut self, point: Point, clicks: u8) -> bool {
+        let damage = self.editor.text_click_at(point, clicks);
+        self.show_caret();
         self.record(damage)
     }
 
@@ -349,10 +348,12 @@ impl DrawState {
             );
         }
 
+        self.editor
+            .update_text_bounds(|id, content, size| wgpu.text_layout_size(id, content, size));
+
         let active_text = self.editor.active_text();
         let editing_id = active_text.and_then(|edit| edit.id);
-        let mut caret = None;
-        {
+        let text_specs = {
             let mut text_specs = Vec::new();
             for element in self.editor.elements() {
                 if Some(element.id) == editing_id {
@@ -383,18 +384,7 @@ impl DrawState {
                 });
             }
             if let Some(edit) = active_text {
-                let key = edit.id.unwrap_or(0);
-                text_specs.push(TextSpec {
-                    key,
-                    content: &edit.content,
-                    left: edit.origin.x,
-                    top: edit.origin.y,
-                    font_size: edit.style.size,
-                    color: edit.style.color,
-                    background_roundness: edit.style.filled.then_some(edit.style.roundness),
-                    scale: edit.scale,
-                });
-                caret = Some((key, edit.cursor, edit.origin, edit.style.size, edit.scale));
+                text_specs.push(edit.spec());
             }
             if let Some((content, at)) = &self.feedback {
                 for (index, [x, y]) in [[15.0, 16.0], [17.0, 16.0], [16.0, 15.0], [16.0, 17.0]]
@@ -423,21 +413,28 @@ impl DrawState {
                     scale: [1.0; 2],
                 });
             }
-            wgpu.prepare_text(&text_specs);
-        }
-        self.editor
-            .update_text_bounds(|id| wgpu.text_layout_size(id));
+            text_specs
+        };
 
         self.previews.clear();
-        if self.caret_visible
-            && let Some((key, cursor, origin, font_size, [scale_x, scale_y])) = caret
-            && let Some(x) = wgpu.text_cursor_x(key, cursor)
-        {
-            self.previews.push(text_caret(
-                origin.x + x * scale_x,
-                origin.y,
-                font_size * scale_y,
-            ));
+        if let Some(edit) = self.editor.active_text() {
+            let [scale_x, scale_y] = edit.scale;
+            let [x, y] = edit.cursor_position();
+            if self.caret_visible && edit.shows_caret() {
+                self.previews.push(text_caret(
+                    edit.origin.x + x * scale_x,
+                    edit.origin.y + y * scale_y,
+                    edit.style.size * scale_y,
+                ));
+            }
+            edit.selection_rectangles(|[x, y, width, height]| {
+                self.previews.push(text_selection(
+                    edit.origin.x + x * scale_x,
+                    edit.origin.x + (x + width) * scale_x,
+                    edit.origin.y + y * scale_y,
+                    height * scale_y,
+                ));
+            });
         }
         self.editor.append_preview_geometry(&mut self.previews);
         self.editor
@@ -446,12 +443,24 @@ impl DrawState {
             self.previews.push(tool_cursor_geometry(point, cursor));
         }
         self.picker = self.editor.picker_geometry();
-        if wgpu.render(&self.previews, self.picker.as_ref(), [origin.x, origin.y]) {
+        if wgpu.render(
+            &self.previews,
+            self.picker.as_ref(),
+            [origin.x, origin.y],
+            &text_specs,
+            self.editor
+                .active_text()
+                .map(|edit| (edit.id.unwrap_or(0), edit.layout())),
+        ) {
             self.damage.insert(output, Damage::None);
         }
     }
 
     fn show_caret(&mut self) -> bool {
+        if !self.editor.active_text().is_some_and(TextEdit::shows_caret) {
+            self.caret_until = None;
+            return false;
+        }
         let changed = !self.caret_visible;
         self.caret_visible = true;
         self.caret_until = Some(Instant::now() + CARET_BLINK_INTERVAL);
@@ -540,4 +549,23 @@ fn text_caret(left: f32, top: f32, scaled_font_size: f32) -> Geometry {
         white,
     ));
     geometry
+}
+
+fn text_selection(start: f32, end: f32, top: f32, line_height: f32) -> Geometry {
+    use kurbo::Shape;
+
+    let left = start.min(end);
+    let right = start.max(end).max(left + 1.0);
+    let bottom = top + line_height;
+    Geometry::fill(
+        kurbo::Rect::new(
+            f64::from(left),
+            f64::from(top.min(bottom)),
+            f64::from(right),
+            f64::from(top.max(bottom)),
+        )
+        .to_path(0.1),
+        FillRule::NonZero,
+        [0.2, 0.45, 1.0, 0.25],
+    )
 }

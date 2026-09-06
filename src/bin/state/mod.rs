@@ -575,8 +575,10 @@ impl State {
         }
     }
 
-    fn double_click_at(&mut self, (x, y): (f64, f64)) -> bool {
-        let changed = self.draw.double_click_at(Point::new(x as f32, y as f32));
+    fn text_click_at(&mut self, (x, y): (f64, f64), clicks: u8) -> bool {
+        let changed = self
+            .draw
+            .text_click_at(Point::new(x as f32, y as f32), clicks);
         if changed {
             self.request_render();
         }

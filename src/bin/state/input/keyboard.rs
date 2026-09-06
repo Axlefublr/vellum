@@ -22,6 +22,8 @@ enum LogicalKey {
     Enter,
     ArrowLeft,
     ArrowRight,
+    ArrowUp,
+    ArrowDown,
     Home,
     End,
     Other,
@@ -36,18 +38,34 @@ fn resolve_keybinding(chord: &KeyChord, editing_text: bool) -> Option<Action> {
     use LogicalKey::*;
 
     if editing_text {
+        let movement = match &chord.key {
+            ArrowLeft if chord.modifiers.ctrl => Some(CursorMove::WordLeft),
+            ArrowLeft => Some(CursorMove::Left),
+            ArrowRight if chord.modifiers.ctrl => Some(CursorMove::WordRight),
+            ArrowRight => Some(CursorMove::Right),
+            ArrowUp => Some(CursorMove::Up),
+            ArrowDown => Some(CursorMove::Down),
+            Home if chord.modifiers.ctrl => Some(CursorMove::TextStart),
+            Home => Some(CursorMove::Home),
+            End if chord.modifiers.ctrl => Some(CursorMove::TextEnd),
+            End => Some(CursorMove::End),
+            _ => None,
+        };
+        if let Some(movement) = movement {
+            return Some(Action::MoveCursor(movement, chord.modifiers.shift));
+        }
         return match &chord.key {
             Escape => Some(Action::Cancel),
             Delete => Some(Action::Delete),
             Backspace if chord.modifiers.ctrl => Some(Action::BackspaceWord),
             Backspace => Some(Action::Backspace),
+            Enter if chord.modifiers.shift => Some(Action::InsertText("\n".into())),
             Enter => Some(Action::CommitText),
-            ArrowLeft if chord.modifiers.ctrl => Some(Action::MoveCursor(CursorMove::WordLeft)),
-            ArrowLeft => Some(Action::MoveCursor(CursorMove::Left)),
-            ArrowRight if chord.modifiers.ctrl => Some(Action::MoveCursor(CursorMove::WordRight)),
-            ArrowRight => Some(Action::MoveCursor(CursorMove::Right)),
-            Home => Some(Action::MoveCursor(CursorMove::Home)),
-            End => Some(Action::MoveCursor(CursorMove::End)),
+            Character(text)
+                if chord.modifiers.ctrl && text.eq_ignore_ascii_case(SELECT_ALL_KEY) =>
+            {
+                Some(Action::SelectAll)
+            }
             Character(text) if !chord.modifiers.ctrl && !text.chars().any(char::is_control) => {
                 Some(Action::InsertText(text.clone()))
             }
@@ -172,6 +190,8 @@ impl KeyboardState {
             }
             value if value.raw() == xkb::keysyms::KEY_Left => LogicalKey::ArrowLeft,
             value if value.raw() == xkb::keysyms::KEY_Right => LogicalKey::ArrowRight,
+            value if value.raw() == xkb::keysyms::KEY_Up => LogicalKey::ArrowUp,
+            value if value.raw() == xkb::keysyms::KEY_Down => LogicalKey::ArrowDown,
             value if value.raw() == xkb::keysyms::KEY_Home => LogicalKey::Home,
             value if value.raw() == xkb::keysyms::KEY_End => LogicalKey::End,
             _ => {

@@ -28,8 +28,8 @@ clap.workspace = true
 wayland-client = "0.31.11"
 # layer shell
 wayland-protocols-wlr = { version = "0.3.9", features = ["client"] }
-# cursor shape
-wayland-protocols = { version = "0.32.9", features = [
+# Wayland protocol extensions
+wayland-protocols = { version = "0.32.13", features = [
     "client",
     "staging",
     "unstable",
@@ -44,8 +44,10 @@ wgpu = { version = "29.0.0", default-features = false, features = [
     "wgsl",
 ] }
 pollster = "0.4.0"
-cosmic-text = { version = "0.18.2", default-features = false, features = ["std", "fontconfig"] }
+parley = { version = "0.11.1", features = ["complex-scripts"] }
 glifo = { version = "0.3.0", features = ["png"] }
+skrifa = "0.44.0"
+vello_common = { version = "0.2.0", features = ["png"] }
 vello_hybrid = { version = "0.2.0", default-features = false, features = ["std", "wgpu", "text"] }
 color.workspace = true
 peniko = { version = "0.6.1", default-features = false }

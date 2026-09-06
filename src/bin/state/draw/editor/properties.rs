@@ -196,7 +196,7 @@ impl Editor {
             let adjustment =
                 stepped_size(edit.style.size, default_text_size, steps, &text_size_range);
             let label = size_label(adjustment.value, default_text_size);
-            edit.style.size = adjustment.value;
+            edit.set_size(adjustment.value);
             return (Damage::Preview, label, adjustment.hit_stop);
         }
         if !self.selected.is_empty() {

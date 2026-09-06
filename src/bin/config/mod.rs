@@ -146,6 +146,39 @@ pub(crate) struct PropertyDefaults {
     pub(crate) roundness: Option<f32>,
     pub(crate) filled: Option<bool>,
     pub(crate) background: Option<bool>,
+    font_family: Option<String>,
+    font_weight: Option<f32>,
+    font_style: Option<String>,
+}
+
+impl PropertyDefaults {
+    fn text_font(&self) -> Result<crate::render::TextFont, String> {
+        use parley::style::{FontFamilyName, FontStyle, FontWeight};
+
+        let family =
+            FontFamilyName::parse_css_list(self.font_family.as_deref().unwrap_or("sans-serif"))
+                .map(|name| name.map(FontFamilyName::into_owned))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("invalid tools.text.font_family: {error}"))?;
+        if family.is_empty() {
+            return Err("tools.text.font_family must not be empty".into());
+        }
+        let weight = self.font_weight.unwrap_or(400.0);
+        if !weight.is_finite() || !(1.0..=1000.0).contains(&weight) {
+            return Err("tools.text.font_weight must be between 1 and 1000".into());
+        }
+        let style = match self.font_style.as_deref().unwrap_or("normal") {
+            "normal" => FontStyle::Normal,
+            "italic" => FontStyle::Italic,
+            "oblique" => FontStyle::Oblique(Some(14.0)),
+            _ => return Err("tools.text.font_style must be normal, italic, or oblique".into()),
+        };
+        Ok(crate::render::TextFont {
+            family,
+            weight: FontWeight::new(weight),
+            style,
+        })
+    }
 }
 
 fn resolve_size_ranges(
@@ -239,6 +272,13 @@ fn validate_tool_defaults(
         if defaults.background.is_some() && tool != state::Tool::Text {
             return Err(format!("{prefix}.background is not supported"));
         }
+        if tool != state::Tool::Text
+            && (defaults.font_family.is_some()
+                || defaults.font_weight.is_some()
+                || defaults.font_style.is_some())
+        {
+            return Err(format!("{prefix} does not support font settings"));
+        }
     }
     Ok(())
 }
@@ -255,6 +295,7 @@ pub(super) struct Settings {
     pub(super) clear_on_escape: bool,
     pub(super) default_fill_shapes: bool,
     pub(super) tool_defaults: ToolDefaults,
+    pub(super) text_font: crate::render::TextFont,
 }
 
 impl Settings {
@@ -322,6 +363,11 @@ impl Settings {
             &file.size_range,
         )?);
         validate_tool_defaults(&file.tools, &size_ranges)?;
+        let text_font = file
+            .tools
+            .get(&state::Tool::Text)
+            .unwrap_or(&PropertyDefaults::default())
+            .text_font()?;
 
         Ok(Self {
             draw_on: file.draw_on.unwrap_or_default(),
@@ -335,6 +381,7 @@ impl Settings {
             clear_on_escape: file.clear_on_escape.unwrap_or(false),
             default_fill_shapes: file.default_fill_shapes.unwrap_or(false),
             tool_defaults: file.tools,
+            text_font,
         })
     }
 }

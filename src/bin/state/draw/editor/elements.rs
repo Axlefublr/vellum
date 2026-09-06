@@ -10,23 +10,33 @@ impl Editor {
 
     pub fn update_text_bounds(
         &mut self,
-        mut layout_size: impl FnMut(ElementId) -> Option<[f32; 2]>,
+        mut layout_size: impl FnMut(ElementId, &str, f32) -> [f32; 2],
     ) {
-        let resizing = match &self.interaction {
+        let previewed = match &self.interaction {
             Some(Interaction::Resizing { id, .. }) => Some(*id),
+            Some(Interaction::EditingText(edit)) => edit.id,
             _ => None,
         };
         for element in &mut self.elements {
-            if !matches!(element.kind, ElementKind::Text { .. }) || Some(element.id) == resizing {
+            if Some(element.id) == previewed {
                 continue;
             }
-            if let Some(size) = layout_size(element.id) {
+            if let ElementKind::Text { content, .. } = &element.kind {
+                let size = layout_size(element.id, content, element.style.size);
                 element.update_text_bounds(size);
             }
         }
     }
 
-    pub fn double_click_at(&mut self, point: Point) -> Damage {
+    pub fn text_click_at(&mut self, point: Point, clicks: u8) -> Damage {
+        if let Some(edit) = self.text_edit_mut() {
+            return if edit.bounds().contains(point) {
+                edit.click(point, clicks, false);
+                Damage::Preview
+            } else {
+                Damage::None
+            };
+        }
         if self.tool != super::super::tool::Tool::Select {
             return Damage::None;
         }
@@ -38,7 +48,11 @@ impl Editor {
             return Damage::None;
         };
         if matches!(element.kind, ElementKind::Text { .. }) && element.hit_test(point) {
-            return self.begin_text_edit(id);
+            let damage = self.begin_text_edit(id);
+            if let Some(edit) = self.text_edit_mut() {
+                edit.click(point, clicks, false);
+            }
+            return damage;
         }
         Damage::None
     }
@@ -163,17 +177,17 @@ impl Editor {
     }
 
     pub(super) fn commit_text(&mut self) -> Damage {
-        let Some(Interaction::EditingText(TextEdit {
+        let Some(Interaction::EditingText(edit)) = self.interaction.take() else {
+            return Damage::None;
+        };
+        let content: String = edit.content().into_iter().collect();
+        let TextEdit {
             id,
             origin,
-            content,
             style,
             scale,
             ..
-        })) = self.interaction.take()
-        else {
-            return Damage::None;
-        };
+        } = edit;
         if content.is_empty() {
             return id.map_or(Damage::Preview, |id| Damage::from_scene(self.remove_id(id)));
         }
@@ -208,14 +222,8 @@ impl Editor {
         else {
             return Damage::None;
         };
-        self.interaction = Some(Interaction::EditingText(TextEdit {
-            id: Some(id),
-            origin: *origin,
-            content: content.clone(),
-            cursor: content.len(),
-            style: element.style,
-            scale: *scale,
-        }));
+        let edit = self.make_text_edit(Some(id), *origin, content.clone(), element.style, *scale);
+        self.interaction = Some(Interaction::EditingText(edit));
         Damage::Scene
     }
 

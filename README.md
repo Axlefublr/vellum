@@ -40,13 +40,13 @@ Install the dependencies for your distribution:
 <summary>Arch dependencies</summary>
 
 ```sh
-sudo pacman -S --needed base-devel git rust wayland libxkbcommon vulkan-icd-loader
+sudo pacman -S --needed base-devel git rust wayland libxkbcommon fontconfig vulkan-icd-loader
 ```
 
 For a PKGBUILD:
 
 ```bash
-depends=('wayland' 'libxkbcommon' 'vulkan-icd-loader')
+depends=('wayland' 'libxkbcommon' 'fontconfig' 'vulkan-icd-loader')
 makedepends=('cargo')
 ```
 
@@ -56,7 +56,7 @@ makedepends=('cargo')
 <summary>Debian 13+ dependencies</summary>
 
 ```sh
-sudo apt install build-essential git pkg-config rustup libwayland-dev libxkbcommon-dev libvulkan1
+sudo apt install build-essential git pkg-config rustup libwayland-dev libxkbcommon-dev libfontconfig-dev libvulkan1
 rustup default stable
 ```
 
@@ -66,7 +66,7 @@ rustup default stable
 <summary>Fedora dependencies</summary>
 
 ```sh
-sudo dnf install cargo gcc git pkgconf-pkg-config wayland-devel libxkbcommon-devel vulkan-loader
+sudo dnf install cargo gcc git pkgconf-pkg-config wayland-devel libxkbcommon-devel fontconfig-devel vulkan-loader
 ```
 
 </details>
@@ -150,6 +150,20 @@ Mod+A { spawn "vellum" "toggle"; }
 | Drag a selection handle | Reshape the selection or stretch text |
 | `Shift` + drag a text handle | Resize text without stretching |
 
+While editing text:
+
+| Input | Action |
+| --- | --- |
+| Arrow keys | Move the caret; `Ctrl+Left/Right` moves by word |
+| `Home` / `End` | Move to the line's start / end; add `Ctrl` for the whole annotation |
+| `Shift` + navigation key | Extend the text selection |
+| `Ctrl+A` | Select all text in the annotation |
+| Click / drag | Position the caret / select text; `Shift` + click extends the selection |
+| Double-click / triple-click | Select a word / line |
+| Typing, `Backspace`, or `Delete` | Replace or delete selected text |
+| `Shift+Enter` | Insert a newline |
+| `Enter` / `Escape` | Finish / cancel editing |
+
 ## Configuration
 
 Vellum looks for `vellum/config.toml` in `$XDG_CONFIG_HOME` (default `~/.config`), then
@@ -185,6 +199,9 @@ Set these properties under `[tools.<tool>]`.
 | `roundness` | float | `pen`, `line`, `arrow`, `triangle`, `rectangle`, `text` | Initial roundness from `0.0` to `1.0` |
 | `filled` | boolean | `triangle`, `rectangle`, `ellipse` | Initial fill state. Inherits `default_fill_shapes` when omitted |
 | `background` | boolean | `text` | Whether text starts with an automatic black or white background |
+| `font_family` | string | `text` | Ordered CSS font-family list, such as `"Inter, Noto Sans, sans-serif"` |
+| `font_weight` | number | `text` | Weight from `1` to `1000`. Defaults to `400`; `700` is bold |
+| `font_style` | string | `text` | `"normal"`, `"italic"`, or `"oblique"`. Defaults to `"normal"` |
 
 ### Defaults
 

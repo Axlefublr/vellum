@@ -129,6 +129,7 @@ fn query(request: Command) -> Result<bool, String> {
 }
 
 fn run_overlay(settings: Settings) -> Result<(), String> {
+    render::init_text_font(settings.text_font.clone());
     let socket_addr = SocketAddr::from_abstract_name(CONTROL_SOCKET)
         .map_err(|error| format!("invalid control socket name: {error}"))?;
     let socket = UnixDatagram::bind_addr(&socket_addr)

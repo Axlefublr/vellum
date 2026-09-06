@@ -2,6 +2,7 @@ mod geometry;
 mod text;
 
 pub use geometry::{DrawCommand, FillRule, Geometry, LocalGeometry, StrokeStyle};
+pub(crate) use text::{TextFont, init_text_font, text_styles, with_text_context};
 pub use text::{TextSpec, text_bounds, text_line_height, text_padding};
 
 use kurbo::Affine;
@@ -100,7 +101,7 @@ pub struct WgpuState {
     picker_composite_pipeline: wgpu::RenderPipeline,
     picker_composite_layout: wgpu::BindGroupLayout,
     picker_target: Option<PickerTarget>,
-    text: Option<TextState>,
+    text: TextState,
 }
 
 pub struct GpuContext {
@@ -276,7 +277,7 @@ impl WgpuState {
             picker_composite_pipeline,
             picker_composite_layout,
             picker_target: None,
-            text: None,
+            text: TextState::default(),
         }
     }
 
@@ -304,34 +305,8 @@ impl WgpuState {
         self.surface.configure(&self.device, &self.surface_config);
     }
 
-    pub fn prepare_text(&mut self, text_specs: &[TextSpec<'_>]) {
-        if !text_specs.is_empty() && self.text.is_none() {
-            self.text = Some(TextState::new());
-        }
-        if let Some(text) = &mut self.text {
-            text.prepare(
-                self.surface_config.width,
-                self.surface_config.height,
-                text_specs,
-            );
-        }
-    }
-
-    pub fn text_layout_size(&self, key: u64) -> Option<[f32; 2]> {
-        self.text.as_ref()?.layout_size(key)
-    }
-
-    pub fn text_cursor_x(&mut self, key: u64, index: usize) -> Option<f32> {
-        self.text.as_mut()?.cursor_x(key, index)
-    }
-
-    pub fn render(
-        &mut self,
-        previews: &[Geometry],
-        picker: Option<&LocalGeometry>,
-        viewport_origin: [f32; 2],
-    ) -> bool {
-        self.render_surface(previews, picker, viewport_origin)
+    pub fn text_layout_size(&mut self, key: u64, content: &str, font_size: f32) -> [f32; 2] {
+        self.text.layout_size(key, content, font_size)
     }
 
     fn composite_picker(
@@ -366,11 +341,13 @@ impl WgpuState {
         pass.draw(0..3, 0..1);
     }
 
-    fn render_surface(
+    pub fn render(
         &mut self,
         previews: &[Geometry],
         picker: Option<&LocalGeometry>,
         viewport_origin: [f32; 2],
+        text_specs: &[TextSpec<'_>],
+        active_text: Option<(u64, &parley::Layout<()>)>,
     ) -> bool {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(output)
@@ -408,13 +385,22 @@ impl WgpuState {
         )));
         let target_is_srgb = self.surface_config.format.is_srgb();
         replay_geometry(&mut self.main_scene, &self.committed, target_is_srgb);
-        if let Some(text) = &mut self.text {
-            text.append_to_scene(
-                &mut self.main_scene,
-                &mut self.main_resources,
-                target_is_srgb,
-            );
-        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        self.text.append_to_scene(
+            &mut text::TextTarget {
+                scene: &mut self.main_scene,
+                resources: &mut self.main_resources,
+                renderer: &mut self.main_renderer,
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut encoder,
+                is_srgb: target_is_srgb,
+            },
+            text_specs,
+            active_text,
+        );
         for geometry in previews {
             replay_geometry(&mut self.main_scene, geometry, target_is_srgb);
         }
@@ -470,9 +456,6 @@ impl WgpuState {
         let swapchain_view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let render_size = vello_hybrid::RenderSize {
             width: u32::from(main_size[0]),
             height: u32::from(main_size[1]),

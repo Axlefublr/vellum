@@ -1,4 +1,5 @@
 {
+  fontconfig,
   installShellFiles,
   lib,
   libxkbcommon,
@@ -42,6 +43,7 @@ rustPlatform.buildRustPackage {
   ];
 
   buildInputs = [
+    fontconfig
     libxkbcommon
     wayland
   ];

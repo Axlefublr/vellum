@@ -27,7 +27,7 @@ pub(crate) enum Action {
     CommitText,
     Backspace,
     BackspaceWord,
-    MoveCursor(CursorMove),
+    MoveCursor(CursorMove, bool),
     InsertText(String),
 }
 
@@ -201,7 +201,13 @@ impl Editor {
         match action {
             Action::Undo if !self.is_editing_text() => effect.damage = self.undo(),
             Action::Redo if !self.is_editing_text() => effect.damage = self.redo(),
-            Action::SelectAll => effect.damage = self.select_all(),
+            Action::SelectAll => {
+                effect.damage = if let Some(edit) = self.text_edit_mut() {
+                    Damage::from_preview(edit.select_all())
+                } else {
+                    self.select_all()
+                };
+            }
             Action::ToggleEraser => effect.damage = self.toggle_eraser(),
             Action::ToggleFill => {
                 let (damage, feedback) = self.toggle_fill();
@@ -235,15 +241,14 @@ impl Editor {
                     effect.damage = Damage::from_preview(edit.backspace_word());
                 }
             }
-            Action::MoveCursor(movement) => {
+            Action::MoveCursor(movement, extend) => {
                 if let Some(edit) = self.text_edit_mut() {
-                    effect.damage = Damage::from_preview(edit.move_cursor(movement));
+                    effect.damage = Damage::from_preview(edit.move_cursor(movement, extend));
                 }
             }
             Action::InsertText(text) => {
                 if let Some(edit) = self.text_edit_mut() {
-                    edit.insert(&text);
-                    effect.damage = Damage::Preview;
+                    effect.damage = Damage::from_preview(edit.insert(&text));
                 }
             }
             _ => {}
@@ -387,6 +392,11 @@ impl Editor {
             return;
         };
         let preview = match &self.interaction {
+            Some(Interaction::EditingText(edit)) if edit.id == Some(id) => {
+                let bounds = edit.bounds();
+                output.push(selection::outline(bounds.min, bounds.max));
+                return;
+            }
             Some(Interaction::Moving {
                 ids,
                 start,
@@ -438,6 +448,17 @@ impl Editor {
 
     pub(super) fn active_text(&self) -> Option<&TextEdit> {
         self.text_edit()
+    }
+
+    pub(super) fn make_text_edit(
+        &mut self,
+        id: Option<ElementId>,
+        origin: Point,
+        content: String,
+        style: Style,
+        scale: [f32; 2],
+    ) -> TextEdit {
+        TextEdit::new(id, origin, content, style, scale)
     }
 
     pub fn element_is_previewed(&self, id: ElementId) -> bool {

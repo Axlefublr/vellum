@@ -94,6 +94,12 @@ impl Editor {
         modifiers: Modifiers,
         tool_override: ToolOverride,
     ) -> Damage {
+        if tool_override == ToolOverride::None
+            && let Some(edit) = self.text_edit_mut()
+            && edit.bounds().contains(point)
+        {
+            return Damage::from_preview(edit.click(point, 1, modifiers.shift));
+        }
         let previous = self.finish_interaction();
         let effective_tool = tool_override.effective_tool(self.tool);
         if effective_tool == Tool::Eraser {
@@ -119,14 +125,8 @@ impl Editor {
             }
             Tool::Text => {
                 let origin = Point::new(point.x, point.y - text_line_height(self.style.size) * 0.5);
-                self.interaction = Some(Interaction::EditingText(TextEdit {
-                    id: None,
-                    origin,
-                    content: String::new(),
-                    cursor: 0,
-                    style: self.style,
-                    scale: [1.0; 2],
-                }));
+                let edit = self.make_text_edit(None, origin, String::new(), self.style, [1.0; 2]);
+                self.interaction = Some(Interaction::EditingText(edit));
                 previous.max(Damage::Preview)
             }
             Tool::Select => {
@@ -187,6 +187,9 @@ impl Editor {
     }
 
     pub fn pointer_motion(&mut self, point: Point, modifiers: Modifiers) -> Damage {
+        if let Some(edit) = self.text_edit_mut() {
+            return Damage::from_preview(edit.drag(point));
+        }
         let text_size_range = self.text_size_range();
         match self.interaction.take() {
             Some(Interaction::Freehand(mut stroke)) => {
@@ -257,6 +260,9 @@ impl Editor {
     }
 
     pub fn pointer_up(&mut self, point: Point, modifiers: Modifiers) -> Damage {
+        if let Some(edit) = self.text_edit_mut() {
+            return Damage::from_preview(edit.end_drag(point));
+        }
         let text_size_range = self.text_size_range();
         match self.interaction.take() {
             Some(Interaction::Freehand(stroke)) => {
