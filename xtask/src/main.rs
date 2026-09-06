@@ -1,13 +1,10 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use clap::{Parser, Subcommand};
-
-#[path = "../../build_support.rs"]
-mod build_support;
 
 #[derive(Parser)]
 #[command(about = "Vellum project tasks")]
@@ -32,20 +29,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .ok_or("xtask is not inside the Vellum workspace")?;
-    let generated = workspace.join("target/xtask");
-    let man_dir = generated.join("man");
-    let completions_dir = generated.join("completions");
-    build_support::generate(&man_dir, &completions_dir)?;
-
-    let status = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-        .args(["install", "--locked", "--path"])
+    let output = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args([
+            "install",
+            "--locked",
+            "--message-format=json-render-diagnostics",
+            "--path",
+        ])
         .arg(workspace)
         .arg("--root")
         .arg(&root)
-        .status()?;
-    if !status.success() {
-        return Err(format!("cargo install failed with {status}").into());
+        .stderr(Stdio::inherit())
+        .output()?;
+    if !output.status.success() {
+        return Err(format!("cargo install failed with {}", output.status).into());
     }
+
+    let messages = serde_json::Deserializer::from_slice(&output.stdout)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<Vec<_>, _>>()?;
+    let package = messages
+        .iter()
+        .find(|message| {
+            message["reason"] == "compiler-artifact" && message["target"]["name"] == "vellum"
+        })
+        .and_then(|message| message["package_id"].as_str())
+        .ok_or("cargo did not report the Vellum artifact")?;
+    let generated = messages
+        .iter()
+        .find(|message| {
+            message["reason"] == "build-script-executed" && message["package_id"] == package
+        })
+        .and_then(|message| message["out_dir"].as_str())
+        .map(Path::new)
+        .ok_or("cargo did not report Vellum's documentation directory")?;
+    let man_dir = generated.join("man");
+    let completions_dir = generated.join("completions");
 
     for entry in fs::read_dir(man_dir)? {
         let source = entry?.path();

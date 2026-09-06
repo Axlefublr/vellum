@@ -1,85 +1,79 @@
-use super::super::scene::{Element, ElementId, ElementKind, HIT_SLOP, Point, Style};
+use super::super::scene::{Element, ElementId, ElementKind, Point, Style};
 use super::super::text_edit::TextEdit;
-use super::{Damage, Editor, HistoryEntry, Interaction};
-use crate::render::Geometry;
+use super::{Editor, HistoryEntry, Interaction};
 
 impl Editor {
     pub fn elements(&self) -> &[Element] {
         &self.elements
     }
 
-    pub fn text_click_at(&mut self, point: Point, clicks: u8) -> Damage {
+    /// Returns None for a miss, or Some(changed) when the text edit handles the click.
+    pub fn text_click_at(&mut self, point: Point, clicks: u8) -> Option<bool> {
         if let Some(edit) = self.text_edit_mut() {
-            return if edit.bounds().contains(point) {
-                edit.click(point, clicks, false);
-                Damage::Preview
-            } else {
-                Damage::None
-            };
+            return edit
+                .bounds()
+                .contains(point)
+                .then(|| edit.click(point, clicks, false));
         }
         if self.tool != super::super::tool::Tool::Select {
-            return Damage::None;
+            return None;
         }
         let [id] = self.selected.as_slice() else {
-            return Damage::None;
+            return None;
         };
         let id = *id;
-        let Some(element) = self.element(id) else {
-            return Damage::None;
-        };
+        let element = self.element(id)?;
         if matches!(element.kind, ElementKind::Text { .. }) && element.hit_test(point) {
-            let damage = self.begin_text_edit(id);
+            let changed = self.begin_text_edit(id);
             if let Some(edit) = self.text_edit_mut() {
                 edit.click(point, clicks, false);
             }
-            return damage;
+            return Some(changed);
         }
-        Damage::None
+        None
     }
 
     pub fn hit_test(&self, point: Point) -> Option<ElementId> {
         self.elements
             .iter()
             .rev()
-            .find(|element| {
-                element.bounds.expanded(HIT_SLOP).contains(point) && element.hit_test(point)
-            })
+            .find(|element| element.hit_test(point))
             .map(|element| element.id)
     }
 
-    pub fn undo(&mut self) -> Damage {
+    pub fn undo(&mut self) -> bool {
         let cancelled = self.cancel_interaction();
         if !self.history.undo(&mut self.elements) {
             return cancelled;
         }
         self.selected.clear();
-        Damage::Scene
+        true
     }
 
-    pub fn redo(&mut self) -> Damage {
+    pub fn redo(&mut self) -> bool {
         let cancelled = self.cancel_interaction();
         if !self.history.redo(&mut self.elements) {
             return cancelled;
         }
         self.selected.clear();
-        Damage::Scene
+        true
     }
 
-    pub(super) fn select_all(&mut self) -> Damage {
+    pub(super) fn select_all(&mut self) -> bool {
         let cancelled = self.cancel_interaction();
         if self.elements.is_empty() {
             return cancelled;
         }
-        let damage = cancelled.max(self.switch_tool(super::super::tool::Tool::Select));
+        let changed = cancelled | self.switch_tool(super::super::tool::Tool::Select);
         let selected = self.elements.iter().map(|element| element.id).collect();
         if self.selected == selected {
-            return damage;
+            return changed;
         }
         self.selected = selected;
-        damage.max(Damage::Preview)
+        true
     }
 
-    pub(super) fn clear(&mut self) -> Damage {
+    pub(super) fn clear(&mut self) -> bool {
         let cancelled = self.cancel_interaction();
         if self.elements.is_empty() {
             return cancelled;
@@ -87,21 +81,21 @@ impl Editor {
         let elements = std::mem::take(&mut self.elements);
         self.history.record(HistoryEntry::Clear(elements));
         self.selected.clear();
-        Damage::Scene
+        true
     }
 
-    pub(super) fn delete_selection(&mut self) -> Damage {
+    pub(super) fn delete_selection(&mut self) -> bool {
         let selected = std::mem::take(&mut self.selected);
         if selected.is_empty() {
-            return Damage::None;
+            return false;
         }
         let cancelled = self.cancel_interaction();
         if selected.len() == self.elements.len() {
             let elements = std::mem::take(&mut self.elements);
             self.history.record(HistoryEntry::Clear(elements));
-            return cancelled.max(Damage::Scene);
+            return true;
         }
-        cancelled.max(Damage::from_scene(self.remove_ids(&selected)))
+        cancelled | self.remove_ids(&selected)
     }
 
     fn remove_ids(&mut self, ids: &[ElementId]) -> bool {
@@ -121,19 +115,10 @@ impl Editor {
     }
 
     pub(super) fn insert_kind(&mut self, kind: ElementKind, style: Style) {
-        self.insert_kind_with_geometry(kind, style, None);
+        self.insert_element(Element::new(self.next_id, kind, style));
     }
 
-    pub(super) fn insert_kind_with_geometry(
-        &mut self,
-        kind: ElementKind,
-        style: Style,
-        geometry: Option<Geometry>,
-    ) {
-        let element = match geometry {
-            Some(geometry) => Element::with_geometry(self.next_id, kind, style, geometry),
-            None => Element::new(self.next_id, kind, style),
-        };
+    pub(super) fn insert_element(&mut self, element: Element) {
         self.next_id += 1;
         let index = self.elements.len();
         let id = element.id;
@@ -146,7 +131,11 @@ impl Editor {
     }
 
     pub(super) fn erase_at(&mut self, point: Point) -> bool {
-        let radius = self.eraser_size() * 0.5;
+        let radius = self
+            .properties(super::super::tool::Tool::Eraser)
+            .expect("eraser has adjustable properties")
+            .size
+            * 0.5;
         let hit = self
             .elements
             .iter()
@@ -156,9 +145,12 @@ impl Editor {
         hit.is_some_and(|id| self.remove_id(id))
     }
 
-    pub(super) fn commit_text(&mut self) -> Damage {
+    pub(super) fn commit_text(&mut self) -> bool {
+        if !self.is_editing_text() {
+            return false;
+        }
         let Some(Interaction::EditingText(edit)) = self.interaction.take() else {
-            return Damage::None;
+            unreachable!("text editing was checked before taking the interaction");
         };
         let content: String = edit.content().into_iter().collect();
         let TextEdit {
@@ -169,7 +161,7 @@ impl Editor {
             ..
         } = edit;
         if content.is_empty() {
-            return id.map_or(Damage::Preview, |id| Damage::from_scene(self.remove_id(id)));
+            return id.is_none_or(|id| self.remove_id(id));
         }
         let kind = ElementKind::Text {
             origin,
@@ -179,7 +171,7 @@ impl Editor {
         if let Some(id) = id {
             let element = self.element_mut(id).expect("editing text exists");
             if element.kind == kind && element.style == style {
-                return Damage::Preview;
+                return true;
             }
             let (kind, style) = element.replace(kind, style);
             self.history
@@ -187,12 +179,12 @@ impl Editor {
         } else {
             self.insert_kind(kind, style);
         }
-        Damage::Scene
+        true
     }
 
-    fn begin_text_edit(&mut self, id: ElementId) -> Damage {
+    fn begin_text_edit(&mut self, id: ElementId) -> bool {
         let Some(element) = self.element(id) else {
-            return Damage::None;
+            return false;
         };
         let ElementKind::Text {
             origin,
@@ -200,11 +192,11 @@ impl Editor {
             scale,
         } = &element.kind
         else {
-            return Damage::None;
+            return false;
         };
         let edit = self.make_text_edit(Some(id), *origin, content.clone(), element.style, *scale);
         self.interaction = Some(Interaction::EditingText(edit));
-        Damage::Scene
+        true
     }
 
     pub(super) fn element(&self, id: ElementId) -> Option<&Element> {

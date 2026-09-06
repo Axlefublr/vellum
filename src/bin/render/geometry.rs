@@ -1,63 +1,16 @@
-use kurbo::{Affine, BezPath, Cap, Join, Stroke};
-
-#[derive(Debug, Clone, Copy)]
-pub enum FillRule {
-    NonZero,
-    EvenOdd,
-}
+use kurbo::{Affine, BezPath, ParamCurveNearest, Shape, Stroke};
+use peniko::Fill;
 
 #[derive(Debug, Clone)]
-pub struct StrokeStyle {
-    pub width: f64,
-    pub join: Join,
-    pub start_cap: Cap,
-    pub end_cap: Cap,
-    pub miter_limit: f64,
-}
-
-impl StrokeStyle {
-    pub fn new(width: f64) -> Self {
-        Self {
-            width,
-            join: Join::Miter,
-            start_cap: Cap::Butt,
-            end_cap: Cap::Butt,
-            miter_limit: 4.0,
-        }
-    }
-
-    pub fn round(width: f64) -> Self {
-        Self {
-            width,
-            join: Join::Round,
-            start_cap: Cap::Round,
-            end_cap: Cap::Round,
-            miter_limit: 4.0,
-        }
-    }
-
-    pub(super) fn as_kurbo(&self) -> Stroke {
-        Stroke {
-            width: self.width,
-            join: self.join,
-            miter_limit: self.miter_limit,
-            start_cap: self.start_cap,
-            end_cap: self.end_cap,
-            ..Stroke::default()
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum DrawCommand {
+pub(super) enum DrawCommand {
     Fill {
         path: BezPath,
-        fill_rule: FillRule,
+        fill_rule: Fill,
         color: [f32; 4],
     },
     Stroke {
         path: BezPath,
-        stroke: StrokeStyle,
+        stroke: Stroke,
         color: [f32; 4],
     },
 }
@@ -84,11 +37,7 @@ impl LocalGeometry {
 }
 
 impl Geometry {
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    pub fn fill(path: BezPath, fill_rule: FillRule, color: [f32; 4]) -> Self {
+    pub fn fill(path: BezPath, fill_rule: Fill, color: [f32; 4]) -> Self {
         Self {
             commands: vec![DrawCommand::Fill {
                 path,
@@ -98,7 +47,7 @@ impl Geometry {
         }
     }
 
-    pub fn stroke(path: BezPath, stroke: StrokeStyle, color: [f32; 4]) -> Self {
+    pub fn stroke(path: BezPath, stroke: Stroke, color: [f32; 4]) -> Self {
         Self {
             commands: vec![DrawCommand::Stroke {
                 path,
@@ -108,8 +57,55 @@ impl Geometry {
         }
     }
 
+    pub fn push_fill(&mut self, path: BezPath, fill_rule: Fill, color: [f32; 4]) {
+        self.commands.push(DrawCommand::Fill {
+            path,
+            fill_rule,
+            color,
+        });
+    }
+
+    pub fn push_stroke(&mut self, path: BezPath, stroke: Stroke, color: [f32; 4]) {
+        self.commands.push(DrawCommand::Stroke {
+            path,
+            stroke,
+            color,
+        });
+    }
+
     pub fn append(&mut self, other: Self) {
         self.commands.extend(other.commands);
+    }
+
+    pub fn fill_hit_test(&self, point: kurbo::Point, slop: f64) -> bool {
+        let slop = slop.max(0.0);
+        let slop_squared = slop.powi(2);
+        self.commands.iter().any(|command| {
+            let DrawCommand::Fill {
+                path, fill_rule, ..
+            } = command
+            else {
+                return false;
+            };
+            // An edge hit avoids scanning the entire outline for its winding.
+            if slop_squared > 0.0
+                && path.segments().any(|segment| {
+                    let bounds = segment.bounding_box().inflate(slop, slop);
+                    point.x >= bounds.x0
+                        && point.x <= bounds.x1
+                        && point.y >= bounds.y0
+                        && point.y <= bounds.y1
+                        && segment.nearest(point, 0.1).distance_sq <= slop_squared
+                })
+            {
+                return true;
+            }
+            let winding = path.winding(point);
+            match fill_rule {
+                Fill::NonZero => winding != 0,
+                Fill::EvenOdd => winding % 2 != 0,
+            }
+        })
     }
 
     pub fn translated(&self, offset: [f32; 2]) -> Self {
@@ -140,9 +136,5 @@ impl Geometry {
                 })
                 .collect(),
         }
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.commands.is_empty()
     }
 }

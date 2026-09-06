@@ -1,7 +1,6 @@
 use super::cli::Cli;
 use super::{Rgba, state};
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -387,11 +386,10 @@ impl Settings {
 }
 
 fn parse_named_color(name: &str, value: &str) -> Result<Rgba, String> {
-    parse_color(value).map_err(|error| format!("invalid {name} {value:?}: {error}"))
-}
-
-fn parse_color(value: &str) -> Result<Rgba, color::ParseError> {
-    value.parse().map(super::color_to_srgb)
+    value
+        .parse()
+        .map(super::color_to_srgb)
+        .map_err(|error| format!("invalid {name} {value:?}: {error}"))
 }
 
 fn read_config(path: &Path) -> Result<FileConfig, String> {
@@ -422,26 +420,21 @@ fn read_first_config(paths: impl IntoIterator<Item = PathBuf>) -> Result<FileCon
 }
 
 fn default_config_paths() -> Vec<PathBuf> {
-    config_paths(
-        std::env::var_os("XDG_CONFIG_HOME"),
-        std::env::var_os("HOME"),
-        std::env::var_os("XDG_CONFIG_DIRS"),
-    )
-}
-
-fn config_paths(
-    xdg_config_home: Option<OsString>,
-    home: Option<OsString>,
-    xdg_config_dirs: Option<OsString>,
-) -> Vec<PathBuf> {
-    let user = absolute_path(xdg_config_home)
-        .or_else(|| absolute_path(home).map(|path| path.join(".config")));
+    let user = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join(".config"))
+        });
     let mut paths: Vec<_> = user
         .into_iter()
         .map(|path| path.join(CONFIG_FILE))
         .collect();
 
-    match xdg_config_dirs.filter(|value| !value.is_empty()) {
+    match std::env::var_os("XDG_CONFIG_DIRS").filter(|value| !value.is_empty()) {
         Some(dirs) => paths.extend(
             std::env::split_paths(&dirs)
                 .filter(|path| path.is_absolute())
@@ -450,8 +443,4 @@ fn config_paths(
         None => paths.push(PathBuf::from("/etc/xdg").join(CONFIG_FILE)),
     }
     paths
-}
-
-fn absolute_path(value: Option<OsString>) -> Option<PathBuf> {
-    value.map(PathBuf::from).filter(|path| path.is_absolute())
 }

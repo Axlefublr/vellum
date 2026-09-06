@@ -5,8 +5,8 @@ pub(crate) use draw::Tool;
 
 use color::DynamicColor;
 use std::collections::BTreeMap;
-use wayland_client::delegate_dispatch;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::{delegate_dispatch, delegate_noop};
 
 use wayland_client::Connection;
 use wayland_client::Dispatch;
@@ -58,22 +58,6 @@ const MAX_PENDING_PEN_SAMPLES: usize = 64;
 const PEN_BEND_DEVIATION_SQUARED: f32 = 0.5 * 0.5;
 type OutputId = u32;
 
-macro_rules! delegate_noop {
-    ($proxy:ty) => {
-        impl Dispatch<$proxy, ()> for State {
-            fn event(
-                _state: &mut Self,
-                _proxy: &$proxy,
-                _event: <$proxy as Proxy>::Event,
-                _data: &(),
-                _conn: &Connection,
-                _qhandle: &QueueHandle<Self>,
-            ) {
-            }
-        }
-    };
-}
-
 #[derive(Default)]
 struct PendingPenMotion {
     anchor: Option<Point>,
@@ -102,49 +86,27 @@ impl PendingPenMotion {
         self.samples.push(point);
     }
 
-    fn take(&mut self) -> ([Point; 2], usize) {
-        let Some(&end) = self.samples.last() else {
-            return ([Point::default(); 2], 0);
-        };
-        let mut output = [end; 2];
-        let mut count = 1;
-        if let Some(anchor) = self.anchor {
-            let bend = self.samples[..self.samples.len() - 1]
+    fn take(&mut self) -> Option<draw::PenMotion> {
+        let &end = self.samples.last()?;
+        let bend = self.anchor.and_then(|anchor| {
+            self.samples[..self.samples.len() - 1]
                 .iter()
                 .copied()
-                .map(|point| (point, segment_distance_squared(point, anchor, end)))
-                .max_by(|(_, first), (_, second)| first.total_cmp(second));
-            if let Some((bend, deviation)) = bend
-                && deviation >= PEN_BEND_DEVIATION_SQUARED
-                && bend != anchor
-                && bend != end
-            {
-                output = [bend, end];
-                count = 2;
-            }
-        }
+                .map(|point| (point, point.segment_distance_squared(anchor, end)))
+                .max_by(|(_, first), (_, second)| first.total_cmp(second))
+                .filter(|(bend, deviation)| {
+                    *deviation >= PEN_BEND_DEVIATION_SQUARED && *bend != anchor && *bend != end
+                })
+                .map(|(bend, _)| bend)
+        });
         self.anchor = Some(end);
         self.samples.clear();
-        (output, count)
+        Some(draw::PenMotion { end, bend })
     }
-}
-
-fn segment_distance_squared(point: Point, start: Point, end: Point) -> f32 {
-    let segment_x = end.x - start.x;
-    let segment_y = end.y - start.y;
-    let length_squared = segment_x.powi(2) + segment_y.powi(2);
-    if length_squared <= f32::EPSILON {
-        return (point.x - start.x).powi(2) + (point.y - start.y).powi(2);
-    }
-    let projection = (((point.x - start.x) * segment_x + (point.y - start.y) * segment_y)
-        / length_squared)
-        .clamp(0.0, 1.0);
-    let nearest_x = start.x + segment_x * projection;
-    let nearest_y = start.y + segment_y * projection;
-    (point.x - nearest_x).powi(2) + (point.y - nearest_y).powi(2)
 }
 
 pub struct State {
+    pub fatal_error: Option<String>,
     active: bool,
     draw_on: DrawOn,
     selected_output: Option<OutputId>,
@@ -209,6 +171,7 @@ impl State {
         let clear_on_escape = settings.clear_on_escape;
 
         let mut state = Self {
+            fatal_error: None,
             active: false,
             draw_on,
             selected_output: None,
@@ -331,6 +294,12 @@ impl State {
     }
 
     fn remove_output(&mut self, id: OutputId) {
+        let pointer_position = self.pointer.remove_output(id);
+        let pointer_owned_gesture = !self.tablet.input_grab_active();
+        let tablet_position = self.tablet.remove_output(id);
+        if let Some(pos) = tablet_position.or(pointer_position.filter(|_| pointer_owned_gesture)) {
+            self.pointer_up(pos, self.modifiers(), false);
+        }
         let Some(mut output) = self.wayland.outputs.remove(&id) else {
             return;
         };
@@ -364,12 +333,15 @@ impl State {
         if self.active {
             self.update_output_input();
         }
+        self.refresh_cursor();
     }
 
     fn focus_output(&mut self, output: OutputId) {
         if !self.active || !self.wayland.outputs.contains_key(&output) {
             return;
         }
+        let selection_changed =
+            self.draw_on == DrawOn::Current && self.selected_output != Some(output);
         if self.draw_on == DrawOn::Current {
             if let Some(selected) = self.selected_output
                 && selected != output
@@ -382,8 +354,10 @@ impl State {
         if self.draw.is_editing_text() {
             return;
         }
-        self.keyboard_output = Some(output);
-        self.update_output_input();
+        if self.keyboard_output != Some(output) || selection_changed {
+            self.keyboard_output = Some(output);
+            self.update_output_input();
+        }
     }
 
     fn restore_keyboard_focus(&mut self) {
@@ -428,7 +402,7 @@ impl State {
             return;
         }
         output_state.origin = origin;
-        self.draw.damage_scene(output);
+        self.draw.damage(output);
         self.request_render();
     }
 
@@ -497,6 +471,7 @@ impl State {
         if self.draw.activate() {
             self.request_render();
         }
+        self.refresh_cursor();
     }
 
     pub fn deactivate(&mut self) {
@@ -523,6 +498,9 @@ impl State {
     }
 
     fn render(&mut self, output: OutputId) {
+        if self.fatal_error.is_some() {
+            return;
+        }
         if let Some(output_state) = self.wayland.outputs.get_mut(&output) {
             let scale = output_state.render_scale();
             let Some(wgpu) = output_state.wgpu.as_mut() else {
@@ -530,10 +508,15 @@ impl State {
             };
             let text_input = &mut self.text_input;
             let proxy = self.wayland.text_input.as_ref();
-            self.draw
-                .render(output, output_state.origin, scale, wgpu, |snapshot| {
-                    text_input.sync_render(proxy, output, snapshot);
-                });
+            if let Err(error) =
+                self.draw
+                    .render(output, output_state.origin, scale, wgpu, |snapshot| {
+                        text_input.sync_render(proxy, output, snapshot);
+                    })
+            {
+                self.fatal_error = Some(error);
+                return;
+            }
             if !self.active {
                 wgpu.release_picker_target();
             }
@@ -550,8 +533,11 @@ impl State {
         output.configure_scale();
         let [width, height] = output.buffer_size();
         if let Some(wgpu) = &mut output.wgpu {
-            wgpu.resize(width, height);
-            self.draw.damage_scene(id);
+            if let Err(error) = wgpu.resize(width, height) {
+                self.fatal_error = Some(error);
+                return;
+            }
+            self.draw.damage(id);
             self.request_render();
         }
     }
@@ -564,7 +550,7 @@ impl State {
             .position()
             .map(|(x, y)| Point::new(x as f32, y as f32));
         let effect = self.draw.handle_action(action, anchor);
-        if effect.damage.changed() {
+        if effect.changed {
             self.request_render();
         }
         if effect.deactivate {
@@ -574,7 +560,7 @@ impl State {
             self.deactivate();
         }
         self.restore_keyboard_focus();
-        self.refresh_pointer_cursor();
+        self.refresh_cursor();
     }
 
     pub fn clear(&mut self) {
@@ -587,6 +573,7 @@ impl State {
         if render {
             self.request_render();
         }
+        self.refresh_cursor();
     }
 
     fn modifiers(&self) -> Modifiers {
@@ -599,6 +586,7 @@ impl State {
         if self.draw.modifiers_changed(modifiers) {
             self.request_render();
         }
+        self.refresh_cursor();
     }
 
     fn pointer_down(
@@ -672,9 +660,8 @@ impl State {
     }
 
     fn open_picker(&mut self, (x, y): (f64, f64)) {
-        if self.draw.open_picker(Point::new(x as f32, y as f32)) {
-            self.request_render();
-        }
+        self.draw.open_picker(Point::new(x as f32, y as f32));
+        self.request_render();
     }
 
     fn toggle_picker(&mut self, pos: (f64, f64)) {
@@ -692,32 +679,36 @@ impl State {
     }
 
     fn text_click_at(&mut self, (x, y): (f64, f64), clicks: u8) -> bool {
-        let changed = self
+        let Some(changed) = self
             .draw
-            .text_click_at(Point::new(x as f32, y as f32), clicks);
+            .text_click_at(Point::new(x as f32, y as f32), clicks)
+        else {
+            return false;
+        };
+        self.focus_keyboard_on_input();
         if changed {
-            self.focus_keyboard_on_input();
             self.request_render();
         }
-        changed
+        true
     }
 
     fn adjust(&mut self, steps: f32, (x, y): (f64, f64), modifiers: Modifiers) -> bool {
-        let adjustment = self
+        let hit_stop = self
             .draw
             .adjust(steps, Point::new(x as f32, y as f32), modifiers);
-        if adjustment.changed {
-            self.request_render();
-        }
-        adjustment.hit_stop
+        self.request_render();
+        hit_stop
     }
 
-    fn refresh_pointer_cursor(&mut self) {
+    fn refresh_cursor(&mut self) {
         if !self.active {
             self.clear_tool_cursor();
             return;
         }
-        if self.tablet.cursor_active() {
+        if let Some(preview_changed) = self.tablet.refresh_cursor(&mut self.draw) {
+            if preview_changed {
+                self.request_render();
+            }
             return;
         }
         let (Some((x, y)), Some(pointer)) = (self.pointer.position(), &self.wayland.pointer) else {
@@ -770,7 +761,8 @@ impl State {
         self.render(id);
         // A successful presentation commits the frame request with its buffer.
         // If acquisition failed, commit the callback alone so it can retry.
-        if self.draw.needs_render(id)
+        if self.fatal_error.is_none()
+            && self.draw.needs_render(id)
             && let Some(output) = self.wayland.outputs.get(&id)
         {
             output.surface.commit();
@@ -778,10 +770,9 @@ impl State {
     }
 
     fn flush_pen_motion(&mut self) {
-        let (points, count) = self.pending_pen_motion.take();
-        if count > 0 {
+        if let Some(motion) = self.pending_pen_motion.take() {
             let modifiers = self.pending_pen_motion.modifiers;
-            self.draw.pen_motion(&points[..count], modifiers);
+            self.draw.pen_motion(motion, modifiers);
         }
     }
 
@@ -877,12 +868,12 @@ impl Output {
     }
 }
 
-delegate_noop!(WlCompositor);
-delegate_noop!(WlRegion);
-delegate_noop!(ZwpTextInputManagerV3);
-delegate_noop!(WpViewporter);
-delegate_noop!(WpViewport);
-delegate_noop!(WpFractionalScaleManagerV1);
+delegate_noop!(State: ignore WlCompositor);
+delegate_noop!(State: ignore WlRegion);
+delegate_noop!(State: ignore ZwpTextInputManagerV3);
+delegate_noop!(State: ignore WpViewporter);
+delegate_noop!(State: ignore WpViewport);
+delegate_noop!(State: ignore WpFractionalScaleManagerV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
     fn event(
@@ -934,7 +925,7 @@ impl Dispatch<WlOutput, OutputId> for State {
     }
 }
 
-delegate_noop!(ZxdgOutputManagerV1);
+delegate_noop!(State: ignore ZxdgOutputManagerV1);
 
 impl Dispatch<WpFractionalScaleV1, OutputId> for State {
     fn event(
@@ -1011,9 +1002,16 @@ impl Dispatch<WlSeat, ()> for State {
         } else if !capabilities.contains(Capability::Pointer)
             && let Some(pointer) = state.wayland.pointer.take()
         {
+            if state.pointer.input_grab_active()
+                && !state.tablet.input_grab_active()
+                && let Some(pos) = state.pointer.position()
+            {
+                state.pointer_up(pos, state.modifiers(), false);
+            }
             pointer.release();
             state.pointer.clear_pointer();
-            state.refresh_pointer_cursor();
+            state.refresh_cursor();
+            state.update_output_input();
         }
         if capabilities.contains(Capability::Keyboard) && state.wayland.keyboard.is_none() {
             state.wayland.keyboard = Some(seat.get_keyboard(qhandle, ()));
@@ -1045,7 +1043,7 @@ impl Dispatch<WlCallback, OutputId> for State {
     }
 }
 
-delegate_noop!(ZwlrLayerShellV1);
+delegate_noop!(State: ignore ZwlrLayerShellV1);
 impl Dispatch<ZwlrLayerSurfaceV1, OutputId> for State {
     fn event(
         state: &mut Self,
@@ -1078,13 +1076,21 @@ impl Dispatch<ZwlrLayerSurfaceV1, OutputId> for State {
                     let surface = output_state.surface.clone();
                     let display = state.wayland.display.clone();
                     let wgpu = if let Some(gpu) = &state.gpu {
-                        WgpuState::new(gpu, gpu.create_surface(&display, &surface), width, height)
+                        gpu.create_surface(&display, &surface)
+                            .and_then(|surface| WgpuState::new(gpu, surface, width, height))
                     } else {
-                        let (gpu, wgpu) = GpuContext::new(&display, &surface, width, height);
-                        state.gpu = Some(gpu);
-                        wgpu
+                        GpuContext::new(&display, &surface, width, height).map(|(gpu, wgpu)| {
+                            state.gpu = Some(gpu);
+                            wgpu
+                        })
                     };
-                    output_state.wgpu = Some(wgpu);
+                    match wgpu {
+                        Ok(wgpu) => output_state.wgpu = Some(wgpu),
+                        Err(error) => {
+                            state.fatal_error = Some(error);
+                            return;
+                        }
+                    }
 
                     // Some compositors require a buffer with the initial configure.
                     state.render(*output);
@@ -1098,14 +1104,14 @@ impl Dispatch<ZwlrLayerSurfaceV1, OutputId> for State {
 
 delegate_dispatch!(State: [WlPointer: ()] => input::PointerState);
 
-delegate_noop!(WpCursorShapeManagerV1);
-delegate_noop!(WpCursorShapeDeviceV1);
+delegate_noop!(State: ignore WpCursorShapeManagerV1);
+delegate_noop!(State: ignore WpCursorShapeDeviceV1);
 
-delegate_noop!(ZwpTabletManagerV2);
+delegate_noop!(State: ignore ZwpTabletManagerV2);
 delegate_dispatch!(State: [ZwpTabletSeatV2: ()] => input::TabletState);
 delegate_dispatch!(State: [ZwpTabletV2: ()] => input::TabletState);
 delegate_dispatch!(State: [ZwpTabletToolV2: ()] => input::TabletState);
 delegate_dispatch!(State: [ZwpTabletPadV2: ()] => input::TabletState);
 delegate_dispatch!(State: [ZwpTabletPadGroupV2: ()] => input::TabletState);
-delegate_noop!(ZwpTabletPadRingV2);
-delegate_noop!(ZwpTabletPadStripV2);
+delegate_noop!(State: ignore ZwpTabletPadRingV2);
+delegate_noop!(State: ignore ZwpTabletPadStripV2);

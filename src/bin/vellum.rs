@@ -39,8 +39,8 @@ fn run() -> Result<ExitCode, String> {
     let arguments = Cli::parse();
     if let Some(subcommand) = &arguments.command {
         let truthy_value = match subcommand {
-            Command::IsActive => query_active()?,
-            Command::IsTextEditing => query_text_editing()?,
+            Command::IsActive => query(Command::IsActive)?,
+            Command::IsTextEditing => query(Command::IsTextEditing)?,
             _ => {
                 send_command(subcommand)?;
                 return Ok(ExitCode::SUCCESS);
@@ -71,14 +71,6 @@ fn send_command(command: &Command) -> Result<(), String> {
         .send(message.as_bytes())
         .map_err(|error| format!("could not send command: {error}"))?;
     Ok(())
-}
-
-fn query_active() -> Result<bool, String> {
-    query(Command::IsActive)
-}
-
-fn query_text_editing() -> Result<bool, String> {
-    query(Command::IsTextEditing)
 }
 
 fn query(request: Command) -> Result<bool, String> {
@@ -134,12 +126,14 @@ fn run_overlay(settings: Settings) -> Result<(), String> {
     let socket = &control.socket;
 
     let (mut state, mut event_queue) = state::State::setup_wayland(settings)?;
-    state.deactivate();
 
     loop {
         event_queue
             .dispatch_pending(&mut state)
             .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
+        if let Some(error) = state.fatal_error.take() {
+            return Err(error);
+        }
         state.sync_text_input();
         let flush_blocked = match event_queue.flush() {
             Ok(()) => false,

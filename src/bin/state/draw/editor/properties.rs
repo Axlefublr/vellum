@@ -1,6 +1,7 @@
-use super::super::scene::{ElementKind, Style, default_roundness, tool_for};
+use super::super::Adjustment;
+use super::super::scene::{ElementKind, Style, tool_for};
 use super::super::tool::Tool;
-use super::{Damage, Editor, HistoryEntry, Interaction};
+use super::{Editor, HistoryEntry, Interaction};
 use crate::config::SizeRange;
 
 const MIN_OPACITY: f32 = 0.05;
@@ -23,9 +24,14 @@ fn background_label(background: bool) -> String {
     format!("Background · {}", if background { "on" } else { "off" })
 }
 
-fn adjust_percent(value: &mut f32, default: f32, steps: f32, min: f32) -> (Damage, String) {
+fn adjust_percent(value: &mut f32, default: f32, steps: f32, min: f32) -> Adjustment {
+    let previous = *value;
     *value = stepped_value(*value, default, steps, 0.01, min, 1.0);
-    (Damage::Preview, percent_label(*value, default))
+    Adjustment {
+        changed: *value != previous,
+        feedback: Some(percent_label(*value, default)),
+        ..Default::default()
+    }
 }
 
 fn stepped_value(value: f32, default: f32, steps: f32, increment: f32, min: f32, max: f32) -> f32 {
@@ -131,10 +137,14 @@ impl ToolPropertySet {
 }
 
 impl Editor {
-    pub(super) fn toggle_fill(&mut self) -> (Damage, String) {
+    pub(super) fn toggle_fill(&mut self) -> Adjustment {
         if let Some(edit) = self.text_edit_mut() {
             edit.style.filled = !edit.style.filled;
-            return (Damage::Preview, background_label(edit.style.filled));
+            return Adjustment {
+                changed: true,
+                feedback: Some(background_label(edit.style.filled)),
+                ..Default::default()
+            };
         }
         if !self.selected.is_empty() {
             let enable = if let Some(Interaction::Resizing { current, .. }) = &self.interaction {
@@ -164,10 +174,14 @@ impl Editor {
             properties.filled = !properties.filled;
             let background = properties.filled;
             self.sync_active_style();
-            return (Damage::Preview, background_label(background));
+            return Adjustment {
+                changed: true,
+                feedback: Some(background_label(background)),
+                ..Default::default()
+            };
         }
         if !self.tool.supports_fill() {
-            return (Damage::None, String::new());
+            return Adjustment::default();
         }
         let properties = self
             .properties_mut(self.tool)
@@ -175,7 +189,11 @@ impl Editor {
         let filled = !properties.filled;
         properties.filled = filled;
         self.sync_active_style();
-        (Damage::Preview, fill_label(filled))
+        Adjustment {
+            changed: true,
+            feedback: Some(fill_label(filled)),
+            ..Default::default()
+        }
     }
 
     pub(super) fn tool_fill(&self, tool: Tool) -> bool {
@@ -183,9 +201,9 @@ impl Editor {
             .is_some_and(|properties| properties.filled)
     }
 
-    pub(in crate::state::draw) fn adjust_size(&mut self, steps: f32) -> (Damage, String, bool) {
+    pub(in crate::state::draw) fn adjust_size(&mut self, steps: f32) -> Adjustment {
         if steps == 0.0 {
-            return (Damage::None, String::new(), false);
+            return Adjustment::default();
         }
         let default_text_size = self
             .default_size(Tool::Text)
@@ -199,14 +217,21 @@ impl Editor {
             let adjustment =
                 stepped_size(edit.style.size, default_text_size, steps, &text_size_range);
             let label = size_label(adjustment.value, default_text_size);
-            edit.set_size(adjustment.value);
-            return (Damage::Preview, label, adjustment.hit_stop);
+            let changed = edit.style.size != adjustment.value;
+            if changed {
+                edit.set_size(adjustment.value);
+            }
+            return Adjustment {
+                changed,
+                feedback: Some(label),
+                hit_stop: adjustment.hit_stop,
+            };
         }
         if !self.selected.is_empty() {
             let defaults = self.default_tool_properties;
             let size_ranges = self.size_ranges.clone();
             let mut hit_stop = false;
-            let (damage, feedback) = self.adjust_selected(|kind, style| {
+            let mut adjustment = self.adjust_selected(|kind, style| {
                 let tool = tool_for(kind);
                 let default = defaults
                     .properties(tool)
@@ -220,11 +245,12 @@ impl Editor {
                 hit_stop |= adjustment.hit_stop;
                 Some(size_label(style.size, default))
             });
-            return (damage, feedback, hit_stop);
+            adjustment.hit_stop = hit_stop;
+            return adjustment;
         }
         let tool = self.tool;
         let Some(default) = self.default_size(tool) else {
-            return (Damage::None, String::new(), false);
+            return Adjustment::default();
         };
         let size_range = self
             .size_ranges
@@ -236,18 +262,21 @@ impl Editor {
             .expect("tools with a default size have adjustable properties");
         let adjustment = stepped_size(properties.size, default, steps, &size_range);
         let label = size_label(adjustment.value, default);
-        if adjustment.value == properties.size {
-            return (Damage::Preview, label, adjustment.hit_stop);
+        let changed = adjustment.value != properties.size;
+        if changed {
+            properties.size = adjustment.value;
+            self.sync_active_style();
         }
-        properties.size = adjustment.value;
-        self.sync_active_style();
-        let damage = self.update_live_stroke_style();
-        (damage.max(Damage::Preview), label, adjustment.hit_stop)
+        Adjustment {
+            changed,
+            feedback: Some(label),
+            hit_stop: adjustment.hit_stop,
+        }
     }
 
-    pub(in crate::state::draw) fn adjust_opacity(&mut self, steps: f32) -> (Damage, String) {
+    pub(in crate::state::draw) fn adjust_opacity(&mut self, steps: f32) -> Adjustment {
         if steps == 0.0 {
-            return (Damage::None, String::new());
+            return Adjustment::default();
         }
         let default_text_opacity = self.default_properties(Tool::Text).opacity;
         if let Some(edit) = self.text_edit_mut() {
@@ -260,32 +289,33 @@ impl Editor {
         }
         if self.selected.is_empty() {
             if matches!(self.tool, Tool::Eraser | Tool::Select) {
-                return (Damage::None, String::new());
+                return Adjustment::default();
             }
             let tool = self.tool;
             let default = self.default_properties(tool).opacity;
             let Some(properties) = self.properties_mut(tool) else {
-                return (Damage::None, String::new());
+                return Adjustment::default();
             };
-            let opacity = stepped_value(properties.opacity, default, steps, 0.01, MIN_OPACITY, 1.0);
-            let label = percent_label(opacity, default);
-            if opacity == properties.opacity {
-                return (Damage::Preview, label);
+            let adjustment = adjust_percent(&mut properties.opacity, default, steps, MIN_OPACITY);
+            if adjustment.changed {
+                self.sync_active_style();
             }
-            properties.opacity = opacity;
-            self.sync_active_style();
-            let damage = self.update_live_stroke_style();
-            return (damage.max(Damage::Preview), label);
+            return adjustment;
         }
-        self.adjust_selected(|_, style| {
-            style.color[3] = stepped_value(style.color[3], 1.0, steps, 0.01, MIN_OPACITY, 1.0);
-            Some(percent_label(style.color[3], 1.0))
+        let defaults = self.default_tool_properties;
+        self.adjust_selected(|kind, style| {
+            let default = defaults
+                .properties(tool_for(kind))
+                .expect("element tools have adjustable properties")
+                .opacity;
+            style.color[3] = stepped_value(style.color[3], default, steps, 0.01, MIN_OPACITY, 1.0);
+            Some(percent_label(style.color[3], default))
         })
     }
 
-    pub(in crate::state::draw) fn adjust_roundness(&mut self, steps: f32) -> (Damage, String) {
+    pub(in crate::state::draw) fn adjust_roundness(&mut self, steps: f32) -> Adjustment {
         if steps == 0.0 {
-            return (Damage::None, String::new());
+            return Adjustment::default();
         }
         let default_text_roundness = self.default_properties(Tool::Text).roundness;
         if let Some(edit) = self.text_edit_mut() {
@@ -299,24 +329,26 @@ impl Editor {
         if self.selected.is_empty() {
             let tool = self.tool;
             if tool.default_roundness().is_none() {
-                return (Damage::None, String::new());
+                return Adjustment::default();
             }
             let default = self.default_properties(tool).roundness;
             let properties = self
                 .properties_mut(tool)
                 .expect("tools with roundness have adjustable properties");
-            let roundness = stepped_value(properties.roundness, default, steps, 0.01, 0.0, 1.0);
-            let label = percent_label(roundness, default);
-            if roundness == properties.roundness {
-                return (Damage::Preview, label);
+            let adjustment = adjust_percent(&mut properties.roundness, default, steps, 0.0);
+            if adjustment.changed {
+                self.sync_active_style();
             }
-            properties.roundness = roundness;
-            self.sync_active_style();
-            let damage = self.update_live_stroke_style();
-            return (damage.max(Damage::Preview), label);
+            return adjustment;
         }
+        let defaults = self.default_tool_properties;
         self.adjust_selected(|kind, style| {
-            let default = default_roundness(kind)?;
+            let tool = tool_for(kind);
+            tool.default_roundness()?;
+            let default = defaults
+                .properties(tool)
+                .expect("element tools have adjustable properties")
+                .roundness;
             style.roundness = stepped_value(style.roundness, default, steps, 0.01, 0.0, 1.0);
             Some(percent_label(style.roundness, default))
         })
@@ -325,7 +357,7 @@ impl Editor {
     fn adjust_selected(
         &mut self,
         mut adjust: impl FnMut(&ElementKind, &mut Style) -> Option<String>,
-    ) -> (Damage, String) {
+    ) -> Adjustment {
         if let Some(Interaction::Resizing {
             properties,
             current,
@@ -333,10 +365,9 @@ impl Editor {
         }) = &mut self.interaction
         {
             let mut style = current.style;
-            let Some(feedback) = adjust(&current.kind, &mut style) else {
-                return (Damage::None, String::new());
-            };
-            if style != current.style {
+            let feedback = adjust(&current.kind, &mut style);
+            let changed = style != current.style;
+            if changed {
                 // Text resizing also changes font size; retain only the user's adjustment.
                 *properties = Style {
                     size: properties.size + (style.size - current.style.size),
@@ -344,67 +375,62 @@ impl Editor {
                 };
                 current.set_style(style);
             }
-            return (Damage::Preview, feedback);
+            return Adjustment {
+                changed,
+                feedback,
+                ..Default::default()
+            };
         }
         let ids = self.selected.clone();
         let mut updates = Vec::with_capacity(ids.len());
-        let mut feedback = String::new();
+        let mut feedback = None;
         for id in ids {
             let Some(element) = self.element_mut(id) else {
                 continue;
             };
             let mut style = element.style;
-            let Some(label) = adjust(&element.kind, &mut style) else {
-                continue;
-            };
-            feedback = label;
+            if let Some(label) = adjust(&element.kind, &mut style) {
+                feedback = Some(label);
+            }
             if style != element.style {
                 let (kind, style) = element.replace(element.kind.clone(), style);
                 updates.push((id, kind, style));
             }
         }
-        if updates.is_empty() {
-            return if feedback.is_empty() {
-                (Damage::None, feedback)
-            } else {
-                (Damage::Preview, feedback)
-            };
+        let changed = !updates.is_empty();
+        if changed {
+            self.history.record(HistoryEntry::Update(updates));
         }
-        self.history.record(HistoryEntry::Update(updates));
-        (Damage::Scene, feedback)
-    }
-
-    fn update_live_stroke_style(&mut self) -> Damage {
-        match &mut self.interaction {
-            Some(Interaction::Freehand(stroke)) => {
-                stroke.update_style(self.style);
-                Damage::Preview
-            }
-            _ => Damage::None,
+        Adjustment {
+            changed,
+            feedback,
+            ..Default::default()
         }
     }
 
-    pub(in crate::state::draw) fn apply_rgba(&mut self, rgba: [f32; 4]) -> Damage {
+    pub(in crate::state::draw) fn apply_rgba(&mut self, rgba: [f32; 4]) -> bool {
+        let mut changed = self.style.color != rgba;
         if let Some(properties) = self.properties_mut(self.color_tool()) {
+            changed |= properties.opacity != rgba[3];
             properties.opacity = rgba[3];
         }
-        self.apply_color(move |color| *color = rgba)
-    }
-
-    fn apply_color(&mut self, apply: impl Fn(&mut [f32; 4])) -> Damage {
-        apply(&mut self.style.color);
+        self.style.color = rgba;
+        self.update_live_stroke_style();
         if let Some(edit) = self.text_edit_mut() {
-            apply(&mut edit.style.color);
-            return Damage::Preview;
+            changed |= edit.style.color != rgba;
+            edit.style.color = rgba;
+            return changed;
         }
         if self.selected.is_empty() {
-            return Damage::Preview;
+            return changed;
         }
-        let (damage, _) = self.adjust_selected(|_, style| {
-            apply(&mut style.color);
-            Some(String::new())
-        });
-        damage.max(Damage::Preview)
+        changed |= self
+            .adjust_selected(|_, style| {
+                style.color = rgba;
+                None
+            })
+            .changed;
+        changed
     }
 
     pub(super) fn properties(&self, tool: Tool) -> Option<&ToolProperties> {
@@ -427,7 +453,7 @@ impl Editor {
             .expect("tools with adjustable properties have defaults")
     }
 
-    fn style_for(&self, tool: Tool) -> Style {
+    pub(super) fn style_for(&self, tool: Tool) -> Style {
         let Some(properties) = self.properties(tool) else {
             return self.style;
         };
@@ -439,23 +465,19 @@ impl Editor {
         style
     }
 
-    pub(super) fn size_for(&self, tool: Tool) -> f32 {
-        self.properties(tool)
-            .map_or(self.style.size, |properties| properties.size)
-    }
-
     pub(super) fn sync_active_style(&mut self) {
         self.style = self.style_for(self.tool);
+        self.update_live_stroke_style();
     }
-}
 
-fn fillable(kind: &ElementKind) -> bool {
-    matches!(
-        kind,
-        ElementKind::Triangle { .. } | ElementKind::Rectangle { .. } | ElementKind::Ellipse { .. }
-    )
+    fn update_live_stroke_style(&mut self) {
+        let style = self.style_for(Tool::Pen);
+        if let Some(Interaction::Freehand(stroke)) = &mut self.interaction {
+            stroke.update_style(style);
+        }
+    }
 }
 
 fn supports_fill(kind: &ElementKind) -> bool {
-    fillable(kind) || matches!(kind, ElementKind::Text { .. })
+    tool_for(kind).supports_fill() || matches!(kind, ElementKind::Text { .. })
 }

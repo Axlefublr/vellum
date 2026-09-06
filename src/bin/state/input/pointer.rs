@@ -69,7 +69,11 @@ impl PointerState {
     }
 
     pub(in crate::state) fn tool_override(&self) -> ToolOverride {
-        ToolOverride::from_eraser(self.middle_button_held)
+        if self.middle_button_held {
+            ToolOverride::InvertEraser
+        } else {
+            ToolOverride::None
+        }
     }
 
     pub(in crate::state) fn tool_cursor_supported(&self) -> bool {
@@ -110,7 +114,21 @@ impl PointerState {
     }
 
     pub(in crate::state) fn clear_pointer(&mut self) {
+        if let Some(device) = self.cursor_shape_device.take() {
+            device.destroy();
+        }
         *self = Self::default();
+    }
+
+    pub(in crate::state) fn remove_output(&mut self, output: OutputId) -> Option<(f64, f64)> {
+        if self.output != Some(output) {
+            return None;
+        }
+        let end_position = self.input_grab_active().then_some(self.position).flatten();
+        self.cancel_gesture();
+        self.event_sequence = EventSequence::default();
+        self.clear_focus();
+        end_position
     }
 
     fn clear_focus(&mut self) {
@@ -120,6 +138,12 @@ impl PointerState {
     }
 
     pub(in crate::state) fn cancel_gesture(&mut self) {
+        self.event_sequence = EventSequence {
+            motion: self.event_sequence.motion,
+            enter_serial: self.event_sequence.enter_serial,
+            left_surface: self.event_sequence.left_surface,
+            ..Default::default()
+        };
         self.left_button_held = false;
         self.right_button_held = false;
         self.middle_button_held = false;
@@ -291,11 +315,20 @@ impl Dispatch<WlPointer, (), State> for PointerState {
         _conn: &Connection,
         _qhandle: &QueueHandle<State>,
     ) {
-        if let wayland_client::protocol::wl_pointer::Event::Enter { surface, .. } = &event
-            && let Some(output) = state.output_for_surface(surface)
+        use wayland_client::protocol::wl_pointer::Event;
+        if !state.active
+            && !matches!(
+                event,
+                Event::Enter { .. } | Event::Leave { .. } | Event::Motion { .. } | Event::Frame
+            )
         {
-            state.focus_output(output);
-            state.pointer.output = Some(output);
+            return;
+        }
+        if let Event::Enter { surface, .. } = &event {
+            state.pointer.output = state.output_for_surface(surface);
+            if let Some(output) = state.pointer.output {
+                state.focus_output(output);
+            }
         }
         let origin = state
             .pointer
@@ -308,6 +341,15 @@ impl Dispatch<WlPointer, (), State> for PointerState {
             .dispatch(event, (f64::from(origin.x), f64::from(origin.y)))
         {
             state.pointer.update_state(sequence);
+            if !state.active || state.pointer.output.is_none() {
+                state.pointer.cancel_gesture();
+                if state.pointer.output.is_none()
+                    || (sequence.left_surface && sequence.enter_serial.is_none())
+                {
+                    state.pointer.clear_focus();
+                }
+                return;
+            }
             let left_pressed = sequence.pressed(LEFT);
             let left_released = sequence.released(LEFT);
             let right_pressed = sequence.pressed(RIGHT);
@@ -371,7 +413,7 @@ impl Dispatch<WlPointer, (), State> for PointerState {
                     && distance_squared(pos, start) > CLICK_SLOP_SQUARED
                 {
                     state.pointer.middle_dragging = true;
-                    state.pointer_down(start, modifiers, ToolOverride::Eraser);
+                    state.pointer_down(start, modifiers, ToolOverride::InvertEraser);
                 }
                 if (state.draw.picker_active()
                     || state.pointer.left_button_held
@@ -421,10 +463,10 @@ impl Dispatch<WlPointer, (), State> for PointerState {
                     }
                 }
             }
-            if sequence.leave_serial.is_some() && sequence.enter_serial.is_none() {
+            if sequence.left_surface && sequence.enter_serial.is_none() {
                 state.pointer.clear_focus();
             }
-            state.refresh_pointer_cursor();
+            state.refresh_cursor();
             if left_pressed
                 || left_released
                 || right_pressed
@@ -466,7 +508,7 @@ struct EventSequence {
     vertical_axis_stopped: bool,
 
     enter_serial: Option<u32>,
-    leave_serial: Option<u32>,
+    left_surface: bool,
 }
 
 impl EventSequence {
@@ -505,8 +547,8 @@ impl EventSequence {
                 self.motion = Some((surface_x + origin.0, surface_y + origin.1));
                 None
             }
-            Event::Leave { serial, surface: _ } => {
-                self.leave_serial = Some(serial);
+            Event::Leave { .. } => {
+                self.left_surface = true;
                 None
             }
             Event::Motion {
@@ -579,11 +621,7 @@ impl EventSequence {
                 self.vertical_axis_stopped = true;
                 None
             }
-            Event::Frame => {
-                let mut tmp = Self::default();
-                std::mem::swap(self, &mut tmp);
-                Some(tmp)
-            }
+            Event::Frame => Some(std::mem::take(self)),
             _ => None,
         }
     }

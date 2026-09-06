@@ -1,6 +1,7 @@
 use super::Modifiers;
-use super::scene::{Bounds, ElementKind, Point, Style, geometry, rendered_path_endpoints};
-use crate::render::{FillRule, Geometry};
+use super::scene::{Bounds, ElementKind, Point, Style, geometry, rendered_segment_endpoints};
+use crate::render::Geometry;
+use peniko::Fill;
 
 const SNAP_STEP: f32 = std::f32::consts::FRAC_PI_4;
 const ENDPOINT_HIT_RADIUS: f32 = 9.0;
@@ -65,7 +66,7 @@ pub(super) fn hit_handle(
 ) -> Option<Handle> {
     triangle_vertex_handle(kind, style, point)
         .or_else(|| {
-            rendered_path_endpoints(kind, style).and_then(|[start, end]| {
+            rendered_segment_endpoints(kind, style).and_then(|[start, end]| {
                 let radius_squared = ENDPOINT_HIT_RADIUS * ENDPOINT_HIT_RADIUS;
                 let start_distance = start.distance_squared(point);
                 let end_distance = end.distance_squared(point);
@@ -118,7 +119,7 @@ pub(super) fn append_handles(kind: &ElementKind, style: Style, output: &mut Vec<
         );
         return;
     }
-    if let Some([start, end]) = rendered_path_endpoints(kind, style) {
+    if let Some([start, end]) = rendered_segment_endpoints(kind, style) {
         let start_geometry = endpoint_geometry(start);
         let end_geometry = start_geometry.translated([end.x - start.x, end.y - start.y]);
         output.extend([start_geometry, end_geometry]);
@@ -176,7 +177,7 @@ fn endpoint_geometry(center: Point) -> Geometry {
             f64::from(VISUAL_RADIUS),
         )
         .to_path(0.05),
-        FillRule::NonZero,
+        Fill::NonZero,
         HANDLE_FILL,
     );
     let radius = VISUAL_RADIUS - SELECTION_WIDTH * 0.5;
@@ -211,35 +212,22 @@ pub(super) fn resize(
                 constrained_triangle_vertex(vertices, index, target, modifiers, equal_side_anchor);
             ElementKind::Triangle { vertices }
         }
-        (
-            ElementKind::Path {
-                points,
-                smooth: false,
-                end_marker,
-            },
-            handle @ (Handle::Start | Handle::End),
-        ) if points.len() >= 2 => {
-            let mut points = points.clone();
+        (ElementKind::Segment { points, arrow }, handle @ (Handle::Start | Handle::End)) => {
+            let mut points = *points;
             match handle {
                 Handle::Start => {
-                    points[0] = constrained_endpoint(
-                        *points.last().expect("non-empty path"),
-                        points[0] + delta,
-                        modifiers.shift,
-                    );
+                    points[0] = constrained_endpoint(points[1], points[0] + delta, modifiers.shift);
                 }
                 Handle::End => {
                     let start = points[0];
-                    let end = *points.last().expect("non-empty path") + delta;
-                    *points.last_mut().expect("non-empty path") =
-                        constrained_endpoint(start, end, modifiers.shift);
+                    let end = points[1] + delta;
+                    points[1] = constrained_endpoint(start, end, modifiers.shift);
                 }
                 _ => unreachable!(),
             }
-            ElementKind::Path {
+            ElementKind::Segment {
                 points,
-                smooth: false,
-                end_marker: *end_marker,
+                arrow: *arrow,
             }
         }
         (ElementKind::Rectangle { min, max }, handle @ (Handle::Corner(_) | Handle::Edge(_))) => {
@@ -675,7 +663,7 @@ pub(super) fn constrained_box(
         delta.x = delta.x.signum() * size;
         delta.y = delta.y.signum() * size;
     }
-    let end = start.translated(delta);
+    let end = start + delta;
     if from_center {
         (
             Point::new(start.x - delta.x.abs(), start.y - delta.y.abs()),

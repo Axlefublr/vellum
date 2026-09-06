@@ -172,7 +172,7 @@ impl Dispatch<ZwpTextInputV3, ()> for State {
                 state.text_input.reset();
                 state.text_input.focused_output = state.output_for_surface(&surface);
                 if let Some(output) = state.text_input.focused_output {
-                    state.draw.damage_preview(output);
+                    state.draw.damage(output);
                     state.request_render();
                 }
             }
@@ -228,7 +228,7 @@ impl Dispatch<ZwpTextInputV3, ()> for State {
                 let resume = session.waiting_for_matching_done && serial == state.text_input.serial;
                 session.waiting_for_matching_done = serial != state.text_input.serial;
                 if resume && let Some(output) = state.text_input.focused_output {
-                    state.draw.damage_preview(output);
+                    state.draw.damage(output);
                 }
                 state.apply_action(Action::ApplyTextInput(batch));
                 if resume {

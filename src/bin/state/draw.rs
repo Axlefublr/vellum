@@ -8,16 +8,15 @@ mod text_edit;
 mod tool;
 mod triangle;
 
-use crate::render::{
-    FillRule, Geometry, LocalGeometry, SceneItem, TextSpec, Viewport, WgpuState, text_line_height,
-};
+use crate::render::{Geometry, SceneItem, TextSpec, Viewport, WgpuState, text_line_height};
+use peniko::Fill;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use super::OutputId;
 
 pub(crate) use self::editor::{Action, CursorMove, TextInputBatch};
-use self::editor::{Damage, Editor, EditorEffect};
+use self::editor::{Editor, EditorEffect};
 use self::scene::ElementKind;
 pub(super) use self::scene::Point;
 pub(crate) use self::selection::CursorHint;
@@ -30,6 +29,7 @@ pub(crate) enum ToolOverride {
     #[default]
     None,
     Eraser,
+    InvertEraser,
 }
 
 impl ToolOverride {
@@ -41,6 +41,8 @@ impl ToolOverride {
         match self {
             Self::None => active,
             Self::Eraser => Tool::Eraser,
+            Self::InvertEraser if active == Tool::Eraser => Tool::Pen,
+            Self::InvertEraser => Tool::Eraser,
         }
     }
 }
@@ -53,12 +55,7 @@ pub(crate) struct ToolCursor {
     pub color: [f32; 4],
 }
 
-pub(crate) const STABILIZER_FOLLOW: f32 = 0.35;
 const CIRCLE_KAPPA: f64 = 0.552_284_749_830_793_6;
-
-pub(crate) fn stabilizer_delay(size: f32) -> f32 {
-    (size * 0.15).clamp(4.0, 16.0)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Cursor {
@@ -84,23 +81,33 @@ pub(crate) struct Modifiers {
     pub alt: bool,
 }
 
-pub(super) struct Adjustment {
-    pub(super) changed: bool,
-    pub(super) hit_stop: bool,
+pub(super) struct PenMotion {
+    pub end: Point,
+    pub bend: Option<Point>,
+}
+
+#[derive(Default)]
+struct Adjustment {
+    changed: bool,
+    feedback: Option<String>,
+    hit_stop: bool,
+}
+
+struct Feedback {
+    text: String,
+    anchor: Point,
+    until: Instant,
 }
 
 pub struct DrawState {
     editor: Editor,
-    damage: BTreeMap<OutputId, Damage>,
-    feedback: Option<(String, Point)>,
-    property_feedback_anchor: Option<Point>,
-    feedback_until: Option<Instant>,
+    changed: BTreeMap<OutputId, bool>,
+    feedback: Option<Feedback>,
     feedback_duration: Duration,
     caret_visible: bool,
     caret_until: Option<Instant>,
     tool_cursor: Option<(Point, ToolCursor)>,
     previews: Vec<Geometry>,
-    picker: Option<LocalGeometry>,
 }
 
 impl DrawState {
@@ -109,35 +116,28 @@ impl DrawState {
         let editor = Editor::new(settings);
         Self {
             editor,
-            damage: BTreeMap::new(),
+            changed: BTreeMap::new(),
             feedback: None,
-            property_feedback_anchor: None,
-            feedback_until: None,
             feedback_duration,
             caret_visible: true,
             caret_until: None,
             tool_cursor: None,
             previews: Vec::new(),
-            picker: None,
         }
     }
 
     pub fn activate(&mut self) -> bool {
-        let damage = self.editor.activate();
-        self.record(damage)
+        let changed = self.editor.activate();
+        self.record(changed)
     }
 
     pub fn deactivate(&mut self) -> bool {
-        let mut damage = self.editor.deactivate();
-        if self.feedback.take().is_some()
-            | self.property_feedback_anchor.take().is_some()
-            | self.feedback_until.take().is_some()
-            | self.tool_cursor.take().is_some()
-        {
-            damage = damage.max(Damage::Preview);
+        let mut changed = self.editor.deactivate();
+        if self.feedback.take().is_some() | self.tool_cursor.take().is_some() {
+            changed = true;
         }
         self.caret_until = None;
-        self.record(damage)
+        self.record(changed)
     }
 
     pub fn is_editing_text(&self) -> bool {
@@ -152,23 +152,27 @@ impl DrawState {
         let user_input = !matches!(action, Action::ApplyTextInput(_));
         let mut effect = self.editor.handle_action(action);
         if let (Some(label), Some(at)) = (effect.feedback.take(), at) {
-            self.property_feedback_anchor = Some(at);
-            self.feedback = Some((label, at));
-            self.feedback_until = Some(Instant::now() + self.feedback_duration);
+            self.feedback = Some(Feedback {
+                text: label,
+                anchor: at,
+                until: Instant::now() + self.feedback_duration,
+            });
+            effect.changed = true;
         }
-        if (user_input || effect.damage.changed()) && self.show_caret() {
-            effect.damage = effect.damage.max(Damage::Preview);
+        if (user_input || effect.changed) && self.show_caret() {
+            effect.changed = true;
         }
-        self.record(effect.damage);
+        self.record(effect.changed);
         effect
     }
 
     pub fn set_current_color(&mut self, rgba: [f32; 4]) -> bool {
+        let mut changed = self.editor.apply_rgba(rgba);
         if let Some((_, cursor)) = &mut self.tool_cursor {
+            changed |= cursor.color != rgba;
             cursor.color = rgba;
         }
-        let damage = self.editor.apply_rgba(rgba);
-        self.record(damage)
+        self.record(changed)
     }
 
     pub fn pointer_down(
@@ -177,37 +181,37 @@ impl DrawState {
         modifiers: Modifiers,
         tool_override: ToolOverride,
     ) -> bool {
-        let mut damage = self.editor.pointer_down(point, modifiers, tool_override);
+        let mut changed = self.editor.pointer_down(point, modifiers, tool_override);
         if self.show_caret() {
-            damage = damage.max(Damage::Preview);
+            changed = true;
         }
-        self.record(damage)
+        self.record(changed)
     }
 
     pub fn pointer_motion(&mut self, point: Point, modifiers: Modifiers) -> bool {
-        let damage = self.editor.pointer_motion(point, modifiers);
-        if damage.changed() {
+        let changed = self.editor.pointer_motion(point, modifiers);
+        if changed {
             self.show_caret();
         }
-        self.record(damage)
+        self.record(changed)
     }
 
-    pub fn pen_motion(&mut self, points: &[Point], modifiers: Modifiers) -> bool {
-        let damage = self.editor.pen_motion(points, modifiers);
-        self.record(damage)
+    pub fn pen_motion(&mut self, motion: PenMotion, modifiers: Modifiers) -> bool {
+        let changed = self.editor.pen_motion(motion, modifiers);
+        self.record(changed)
     }
 
     pub fn modifiers_changed(&mut self, modifiers: Modifiers) -> bool {
-        let damage = self.editor.modifiers_changed(modifiers);
-        self.record(damage)
+        let changed = self.editor.modifiers_changed(modifiers);
+        self.record(changed)
     }
 
     pub fn pointer_up(&mut self, point: Point, modifiers: Modifiers) -> bool {
-        let damage = self.editor.pointer_up(point, modifiers);
-        if damage.changed() {
+        let changed = self.editor.pointer_up(point, modifiers);
+        if changed {
             self.show_caret();
         }
-        self.record(damage)
+        self.record(changed)
     }
 
     pub fn picker_active(&self) -> bool {
@@ -223,123 +227,122 @@ impl DrawState {
             return false;
         }
         self.tool_cursor = cursor;
-        self.record(Damage::Preview);
+        self.record(true);
         true
     }
 
-    pub fn open_picker(&mut self, center: Point) -> bool {
-        let damage = self.editor.open_picker(center);
-        self.record(damage)
+    pub fn open_picker(&mut self, center: Point) {
+        self.editor.open_picker(center);
+        self.record(true);
     }
 
     pub fn picker_motion(&mut self, point: Point) -> bool {
-        let damage = self.editor.picker_motion(point);
-        self.record(damage)
+        let changed = self.editor.picker_motion(point);
+        self.record(changed)
     }
 
     pub fn picker_release(&mut self, point: Point, latch_center: bool) -> bool {
-        let damage = self.editor.picker_release(point, latch_center);
-        self.record(damage)
+        let changed = self.editor.picker_release(point, latch_center);
+        self.record(changed)
     }
 
     pub fn dismiss_picker(&mut self) -> bool {
-        let damage = self.editor.dismiss_picker();
-        self.record(damage)
+        let changed = self.editor.dismiss_picker();
+        self.record(changed)
     }
 
-    pub fn text_click_at(&mut self, point: Point, clicks: u8) -> bool {
-        let damage = self.editor.text_click_at(point, clicks);
-        self.show_caret();
-        self.record(damage)
+    pub fn text_click_at(&mut self, point: Point, clicks: u8) -> Option<bool> {
+        let mut changed = self.editor.text_click_at(point, clicks)?;
+        changed |= self.show_caret();
+        Some(self.record(changed))
     }
 
-    pub fn adjust(&mut self, steps: f32, at: Point, modifiers: Modifiers) -> Adjustment {
-        let (damage, feedback, hit_stop) = if modifiers.shift {
-            let (damage, feedback) = self.editor.adjust_roundness(steps);
-            (damage, feedback, false)
+    pub fn adjust(&mut self, steps: f32, at: Point, modifiers: Modifiers) -> bool {
+        let adjustment = if modifiers.shift {
+            self.editor.adjust_roundness(steps)
         } else if modifiers.ctrl {
-            let (damage, feedback) = self.editor.adjust_opacity(steps);
-            (damage, feedback, false)
+            self.editor.adjust_opacity(steps)
         } else {
             self.editor.adjust_size(steps)
         };
-        if damage.changed() {
-            let anchor = *self.property_feedback_anchor.get_or_insert(at);
-            self.feedback = Some((feedback, anchor));
-            self.feedback_until = Some(Instant::now() + self.feedback_duration);
-            self.record(damage);
+        self.record(adjustment.changed || adjustment.feedback.is_some());
+        if let Some(text) = adjustment.feedback {
+            let anchor = self
+                .feedback
+                .as_ref()
+                .map_or(at, |feedback| feedback.anchor);
+            self.feedback = Some(Feedback {
+                text,
+                anchor,
+                until: Instant::now() + self.feedback_duration,
+            });
         }
-        Adjustment {
-            changed: damage.changed(),
-            hit_stop,
-        }
+        adjustment.hit_stop
     }
 
     pub fn add_output(&mut self, output: OutputId) {
-        self.damage.insert(output, Damage::Scene);
+        self.changed.insert(output, true);
     }
 
     pub fn remove_output(&mut self, output: OutputId) {
-        self.damage.remove(&output);
+        self.changed.remove(&output);
     }
 
     pub(crate) fn text_input_snapshot(&self) -> Option<TextInputSnapshot<'_>> {
-        self.editor.active_text().map(|edit| edit.snapshot(None))
+        self.editor.text_edit().map(|edit| edit.snapshot(None))
     }
 
     pub(crate) fn clear_preedit(&mut self) -> bool {
         if self.editor.clear_preedit() {
             self.show_caret();
-            self.record(Damage::Preview)
+            self.record(true)
         } else {
             false
         }
     }
 
     pub fn needs_render(&self, output: OutputId) -> bool {
-        self.damage
-            .get(&output)
-            .is_some_and(|damage| damage.changed())
+        self.changed.get(&output).is_some_and(|changed| *changed)
     }
 
     pub fn damaged_outputs(&self) -> impl Iterator<Item = OutputId> + '_ {
-        self.damage
+        self.changed
             .iter()
-            .filter(|(_, damage)| damage.changed())
+            .filter(|(_, changed)| **changed)
             .map(|(&output, _)| output)
     }
 
-    pub fn damage_scene(&mut self, output: OutputId) {
-        self.damage.entry(output).or_default().merge(Damage::Scene);
+    pub fn damage(&mut self, output: OutputId) {
+        self.changed.insert(output, true);
     }
 
-    pub(crate) fn damage_preview(&mut self, output: OutputId) {
-        self.damage
-            .entry(output)
-            .or_default()
-            .merge(Damage::Preview);
-    }
-
-    fn record(&mut self, damage: Damage) -> bool {
-        for current in self.damage.values_mut() {
-            current.merge(damage);
+    fn record(&mut self, changed: bool) -> bool {
+        if changed {
+            for current in self.changed.values_mut() {
+                *current = true;
+            }
         }
-        damage.changed()
+        changed
     }
 
     pub fn next_wakeup(&self) -> Option<Instant> {
-        [self.feedback_until, self.caret_until]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.feedback.as_ref().map(|feedback| feedback.until),
+            self.caret_until,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub fn handle_timeouts(&mut self, now: Instant) -> bool {
         let mut changed = false;
-        if self.feedback_until.is_some_and(|until| now >= until) {
+        if self
+            .feedback
+            .as_ref()
+            .is_some_and(|feedback| now >= feedback.until)
+        {
             self.feedback = None;
-            self.property_feedback_anchor = None;
-            self.feedback_until = None;
             changed = true;
         }
         if self.caret_until.is_some_and(|until| now >= until) {
@@ -352,7 +355,7 @@ impl DrawState {
             }
         }
         if changed {
-            self.record(Damage::Preview);
+            self.record(true);
         }
         changed
     }
@@ -364,14 +367,13 @@ impl DrawState {
         scale: [f64; 2],
         wgpu: &mut WgpuState,
         before_present: impl FnOnce(Option<TextInputSnapshot<'_>>),
-    ) {
-        let damage = self.damage.get(&output).copied().unwrap_or_default();
-        if !damage.changed() {
-            return;
+    ) -> Result<(), String> {
+        if !self.needs_render(output) {
+            return Ok(());
         }
-        let active_text = self.editor.active_text();
+        let active_text = self.editor.text_edit();
         let items = {
-            let mut items = Vec::new();
+            let mut items = Vec::with_capacity(self.editor.elements().len());
             for element in self.editor.elements() {
                 if let Some(edit) = active_text.filter(|edit| edit.id == Some(element.id)) {
                     items.push(SceneItem::Text(edit.spec()));
@@ -410,13 +412,15 @@ impl DrawState {
             if let Some(edit) = active_text.filter(|edit| edit.id.is_none()) {
                 items.push(SceneItem::Text(edit.spec()));
             }
-            if let Some((content, at)) = &self.feedback {
-                for (index, [x, y]) in [[15.0, 16.0], [17.0, 16.0], [16.0, 15.0], [16.0, 17.0]]
-                    .into_iter()
-                    .enumerate()
-                {
+            if let Some(Feedback {
+                text: content,
+                anchor: at,
+                ..
+            }) = &self.feedback
+            {
+                for [x, y] in [[15.0, 16.0], [17.0, 16.0], [16.0, 15.0], [16.0, 17.0]].into_iter() {
                     items.push(SceneItem::Text(TextSpec {
-                        key: u64::MAX - 34 + index as u64,
+                        key: u64::MAX - 30,
                         content,
                         left: at.x + x,
                         top: at.y + y,
@@ -442,7 +446,7 @@ impl DrawState {
 
         self.previews.clear();
         let mut cursor_rectangle = None;
-        if let Some(edit) = self.editor.active_text() {
+        if let Some(edit) = self.editor.text_edit() {
             let [scale_x, scale_y] = edit.scale;
             let [x, y] = edit.cursor_position();
             cursor_rectangle = Some(text_cursor_rectangle(
@@ -470,36 +474,37 @@ impl DrawState {
         }
         self.editor.append_preview_geometry(&mut self.previews);
         self.editor
-            .append_selection_geometry(self.property_feedback_anchor.is_none(), &mut self.previews);
+            .append_selection_geometry(self.feedback.is_none(), &mut self.previews);
         if let Some((point, cursor)) = self.tool_cursor {
             self.previews.push(tool_cursor_geometry(point, cursor));
         }
-        self.picker = self.editor.picker_geometry();
+        let picker = self.editor.picker_geometry();
         if wgpu.render(
             &items,
             &self.previews,
-            self.picker.as_ref(),
+            picker.as_ref(),
             Viewport {
                 origin: [origin.x, origin.y],
                 scale,
             },
             self.editor
-                .active_text()
+                .text_edit()
                 .map(|edit| (edit.id.unwrap_or(0), edit.layout())),
             || {
                 before_present(
                     self.editor
-                        .active_text()
+                        .text_edit()
                         .map(|edit| edit.snapshot(cursor_rectangle)),
                 );
             },
-        ) {
-            self.damage.insert(output, Damage::None);
+        )? {
+            self.changed.insert(output, false);
         }
+        Ok(())
     }
 
     fn show_caret(&mut self) -> bool {
-        if !self.editor.active_text().is_some_and(TextEdit::shows_caret) {
+        if !self.editor.text_edit().is_some_and(TextEdit::shows_caret) {
             self.caret_until = None;
             return false;
         }
@@ -527,14 +532,14 @@ fn tool_cursor_geometry(point: Point, cursor: ToolCursor) -> Geometry {
         const OUTLINE_WIDTH: f64 = 0.75;
         let mut geometry = Geometry::fill(
             kurbo::Circle::new(center, radius + OUTLINE_WIDTH).to_path(0.1),
-            FillRule::NonZero,
+            Fill::NonZero,
             [0.0, 0.0, 0.0, 1.0],
         );
-        geometry.append(Geometry::fill(
+        geometry.push_fill(
             kurbo::Circle::new(center, radius).to_path(0.1),
-            FillRule::NonZero,
+            Fill::NonZero,
             [1.0, 1.0, 1.0, 1.0],
-        ));
+        );
         return geometry;
     }
 
@@ -550,7 +555,7 @@ fn tool_cursor_geometry(point: Point, cursor: ToolCursor) -> Geometry {
             corner_radius,
         )
         .to_path(0.1),
-        FillRule::NonZero,
+        Fill::NonZero,
         color,
     )
 }
@@ -576,10 +581,10 @@ fn text_caret(left: f32, top: f32, scaled_font_size: f32) -> Geometry {
             f64::from(bottom),
         )
         .to_path(0.1),
-        FillRule::NonZero,
+        Fill::NonZero,
         black,
     );
-    geometry.append(Geometry::fill(
+    geometry.push_fill(
         kurbo::Rect::new(
             f64::from(left - 0.5),
             f64::from(top),
@@ -587,9 +592,9 @@ fn text_caret(left: f32, top: f32, scaled_font_size: f32) -> Geometry {
             f64::from(bottom),
         )
         .to_path(0.1),
-        FillRule::NonZero,
+        Fill::NonZero,
         white,
-    ));
+    );
     geometry
 }
 
@@ -635,7 +640,7 @@ fn text_preedit_span(
                 f64::from(top.max(bottom)),
             )
             .to_path(0.1),
-            FillRule::NonZero,
+            Fill::NonZero,
             [0.2, 0.45, 1.0, 0.25],
         );
     }
@@ -655,7 +660,7 @@ fn text_preedit_span(
             f64::from(baseline + 1.5),
         )
         .to_path(0.1),
-        FillRule::NonZero,
+        Fill::NonZero,
         color,
     )
 }

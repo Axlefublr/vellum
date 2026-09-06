@@ -14,9 +14,6 @@ default-members = ["."]
 
 [workspace.dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
-clap_complete = "4.6.9"
-clap_complete_nushell = "4.6.2"
-clap_mangen = "0.3.0"
 color = "0.3.3"
 
 [dependencies]
@@ -60,7 +57,7 @@ perfect_freehand = "0.1.1"
 
 [build-dependencies]
 clap.workspace = true
-clap_complete.workspace = true
-clap_complete_nushell.workspace = true
-clap_mangen.workspace = true
+clap_complete = "4.6.9"
+clap_complete_nushell = "4.6.2"
+clap_mangen = "0.3.0"
 color.workspace = true

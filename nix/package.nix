@@ -24,7 +24,6 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../build.rs
-      ../build_support.rs
       ../default-config.toml
       ../src
       ../xtask/Cargo.toml
@@ -49,8 +48,13 @@ rustPlatform.buildRustPackage {
   ];
 
   postInstall = ''
-    outputDir=$(find target -type d -path '*/build/vellum-*/out' \
-      -exec test -f '{}/completions/vellum.bash' ';' -print -quit)
+    mapfile -d "" outputDirs < <(find "$tmpDir/build" -type d -path '*/build/vellum-*/out' \
+      -exec test -f '{}/completions/vellum.bash' ';' -print0)
+    if [ "''${#outputDirs[@]}" -ne 1 ]; then
+      echo "Expected one Vellum documentation directory, found ''${#outputDirs[@]}" >&2
+      exit 1
+    fi
+    outputDir=''${outputDirs[0]}
     installManPage "$outputDir"/man/*.1
     installShellCompletion "$outputDir"/completions/vellum.{bash,fish,nu} \
       --zsh "$outputDir"/completions/_vellum

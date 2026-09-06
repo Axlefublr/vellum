@@ -34,7 +34,7 @@ jobs:
         run: sudo apt-get install -y libfontconfig-dev libwayland-dev libxkbcommon-dev
       - name: Verify version and build
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "vellum") | .version')
           test "$GITHUB_REF_NAME" = "v$version"
           cargo build --locked --release --target "${{ matrix.target }}"
       - name: Package
@@ -42,8 +42,13 @@ jobs:
           mkdir -p "$PACKAGE/share/man/man1" "$PACKAGE/share/shell-completions"
           cp README.md LICENSE default-config.toml "target/${{ matrix.target }}/release/vellum" "$PACKAGE"
 
-          output_dir=$(find "target/${{ matrix.target }}/release/build" -type d -path '*/vellum-*/out' \
-            -exec test -f '{}/completions/vellum.bash' ';' -print -quit)
+          mapfile -d '' output_dirs < <(find "target/${{ matrix.target }}/release/build" -type d -path '*/vellum-*/out' \
+            -exec test -f '{}/completions/vellum.bash' ';' -print0)
+          if [ "${#output_dirs[@]}" -ne 1 ]; then
+            echo "Expected one Vellum documentation directory, found ${#output_dirs[@]}" >&2
+            exit 1
+          fi
+          output_dir=${output_dirs[0]}
           cp "$output_dir/man"/*.1 "$PACKAGE/share/man/man1"
           cp "$output_dir/completions"/* "$PACKAGE/share/shell-completions"
 

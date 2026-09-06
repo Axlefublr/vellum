@@ -1,7 +1,8 @@
 mod geometry;
 mod text;
 
-pub use geometry::{DrawCommand, FillRule, Geometry, LocalGeometry, StrokeStyle};
+use geometry::DrawCommand;
+pub use geometry::{Geometry, LocalGeometry};
 pub(crate) use text::{TextFont, init_text_font, layout_text, text_styles, with_text_context};
 pub use text::{TextSpec, text_bounds, text_line_height, text_padding};
 
@@ -26,11 +27,10 @@ pub enum SceneItem<'a> {
 }
 
 struct PickerTarget {
-    _texture: wgpu::Texture,
     view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
     composite_buffer: wgpu::Buffer,
-    size: [u32; 2],
+    size: [u16; 2],
     origin: [f32; 2],
 }
 
@@ -45,17 +45,15 @@ impl PickerTarget {
     fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        size: [u32; 2],
+        size: [u16; 2],
         origin: [f32; 2],
         layout: &wgpu::BindGroupLayout,
-    ) -> Option<Self> {
-        let width = size[0].checked_mul(PICKER_RENDER_SCALE)?;
-        let height = size[1].checked_mul(PICKER_RENDER_SCALE)?;
+    ) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("picker target"),
             size: wgpu::Extent3d {
-                width,
-                height,
+                width: u32::from(size[0]),
+                height: u32::from(size[1]),
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -85,14 +83,13 @@ impl PickerTarget {
                 },
             ],
         });
-        Some(Self {
-            _texture: texture,
+        Self {
             view,
             bind_group,
             composite_buffer,
             size,
             origin,
-        })
+        }
     }
 }
 
@@ -127,18 +124,18 @@ impl GpuContext {
         surface: &WlSurface,
         width: u32,
         height: u32,
-    ) -> (Self, WgpuState) {
+    ) -> Result<(Self, WgpuState), String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let surface = create_surface(&instance, display, surface);
+        let surface = create_surface(&instance, display, surface)?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
         }))
-        .unwrap();
+        .map_err(|error| format!("could not select a Vulkan adapter: {error}"))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: None,
             required_features: wgpu::Features::empty(),
@@ -147,22 +144,22 @@ impl GpuContext {
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             trace: wgpu::Trace::Off,
         }))
-        .unwrap();
+        .map_err(|error| format!("could not create the GPU device: {error}"))?;
         let gpu = Self {
             instance,
             adapter,
             device,
             queue,
         };
-        let wgpu = WgpuState::new(&gpu, surface, width, height);
-        (gpu, wgpu)
+        let wgpu = WgpuState::new(&gpu, surface, width, height)?;
+        Ok((gpu, wgpu))
     }
 
     pub fn create_surface(
         &self,
         display: &WlDisplay,
         surface: &WlSurface,
-    ) -> wgpu::Surface<'static> {
+    ) -> Result<wgpu::Surface<'static>, String> {
         create_surface(&self.instance, display, surface)
     }
 }
@@ -171,7 +168,7 @@ fn create_surface(
     instance: &wgpu::Instance,
     display: &WlDisplay,
     surface: &WlSurface,
-) -> wgpu::Surface<'static> {
+) -> Result<wgpu::Surface<'static>, String> {
     let raw_display_handle =
         wgpu::rwh::RawDisplayHandle::Wayland(wgpu::rwh::WaylandDisplayHandle::new(
             std::ptr::NonNull::new(display.id().as_ptr() as *mut _).unwrap(),
@@ -186,18 +183,25 @@ fn create_surface(
             raw_window_handle,
         })
     }
-    .unwrap()
+    .map_err(|error| format!("could not create the Wayland GPU surface: {error}"))
 }
 
 impl WgpuState {
-    pub fn new(gpu: &GpuContext, surface: wgpu::Surface<'static>, width: u32, height: u32) -> Self {
+    pub fn new(
+        gpu: &GpuContext,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        checked_target_size(&gpu.device, [width, height], "annotation")?;
         let capabilities = surface.get_capabilities(&gpu.adapter);
         let format = capabilities
             .formats
             .iter()
             .find(|format| format.is_srgb())
             .copied()
-            .unwrap_or(capabilities.formats[0]);
+            .or_else(|| capabilities.formats.first().copied())
+            .ok_or("GPU adapter does not support the Wayland surface")?;
         let alpha_mode = capabilities
             .alpha_modes
             .iter()
@@ -271,7 +275,7 @@ impl WgpuState {
         let (picker_renderer, picker_resources) =
             vello_hybrid::Renderer::new(&device, &target_config);
 
-        Self {
+        Ok(Self {
             surface,
             surface_config,
             device,
@@ -287,28 +291,29 @@ impl WgpuState {
             picker_composite_layout,
             picker_target: None,
             text: TextState::default(),
-        }
+        })
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
         if width == 0
             || height == 0
             || (width == self.surface_config.width && height == self.surface_config.height)
         {
-            return;
+            return Ok(());
         }
+        checked_target_size(&self.device, [width, height], "annotation")?;
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
+        Ok(())
     }
 
     fn composite_picker(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        load: wgpu::LoadOp<wgpu::Color>,
         source: &PickerTarget,
-        viewport: Option<[f32; 4]>,
+        viewport: [f32; 4],
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("composite picker"),
@@ -317,7 +322,7 @@ impl WgpuState {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load,
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -327,9 +332,8 @@ impl WgpuState {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.picker_composite_pipeline);
-        if let Some([x, y, width, height]) = viewport {
-            pass.set_viewport(x, y, width, height, 0.0, 1.0);
-        }
+        let [x, y, width, height] = viewport;
+        pass.set_viewport(x, y, width, height, 0.0, 1.0);
         pass.set_bind_group(0, &source.bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
@@ -342,40 +346,36 @@ impl WgpuState {
         viewport: Viewport,
         active_text: Option<(u64, &parley::Layout<()>)>,
         before_present: impl FnOnce(),
-    ) -> bool {
+    ) -> Result<bool, String> {
         let Viewport {
             origin: viewport_origin,
             scale,
         } = viewport;
-        let output = match self.surface.get_current_texture() {
+        let mut status = self.surface.get_current_texture();
+        if matches!(
+            status,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost
+        ) {
+            self.surface.configure(&self.device, &self.surface_config);
+            status = self.surface.get_current_texture();
+        }
+        let output = match status {
             wgpu::CurrentSurfaceTexture::Success(output)
             | wgpu::CurrentSurfaceTexture::Suboptimal(output) => output,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.surface_config);
-                match self.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(output)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(output) => output,
-                    status => {
-                        eprintln!("vellum: surface retry failed: {status:?}");
-                        return false;
-                    }
-                }
-            }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return false;
-            }
+            wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Lost => return Ok(false),
             wgpu::CurrentSurfaceTexture::Validation => {
-                eprintln!("vellum: surface acquisition validation error");
-                return false;
+                return Err("surface acquisition validation error".into());
             }
         };
 
-        let Some(main_size) = checked_scene_size(
+        let main_size = checked_target_size(
+            &self.device,
             [self.surface_config.width, self.surface_config.height],
             "annotation",
-        ) else {
-            return false;
-        };
+        )?;
         self.main_scene.reset_and_resize(main_size[0], main_size[1]);
         self.main_scene.set_transform(
             Affine::scale_non_uniform(scale[0], scale[1])
@@ -421,25 +421,19 @@ impl WgpuState {
                 (f64::from(picker.size[0]) * scale[0]).ceil() as u32,
                 (f64::from(picker.size[1]) * scale[1]).ceil() as u32,
             ];
-            let Some(scene_size) = checked_picker_scene_size(size) else {
-                return false;
-            };
+            let scene_size = checked_picker_scene_size(&self.device, size)?;
             if self
                 .picker_target
                 .as_ref()
-                .is_none_or(|target| target.size != size)
+                .is_none_or(|target| target.size != scene_size)
             {
-                self.picker_target = PickerTarget::new(
+                self.picker_target = Some(PickerTarget::new(
                     &self.device,
                     self.surface_config.format,
-                    size,
+                    scene_size,
                     picker_origin,
                     &self.picker_composite_layout,
-                );
-                if self.picker_target.is_none() {
-                    eprintln!("vellum: picker render target dimensions overflow");
-                    return false;
-                }
+                ));
             }
             let target = self.picker_target.as_mut().unwrap();
             if target.origin != picker_origin {
@@ -471,37 +465,35 @@ impl WgpuState {
             width: u32::from(main_size[0]),
             height: u32::from(main_size[1]),
         };
-        if let Err(error) = self.main_renderer.render(
-            &self.main_scene,
-            &mut self.main_resources,
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            &render_size,
-            &swapchain_view,
-            &self.texture_bindings,
-        ) {
-            eprintln!("vellum: Vello annotation render failed: {error}");
-            return false;
-        }
+        self.main_renderer
+            .render(
+                &self.main_scene,
+                &mut self.main_resources,
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &render_size,
+                &swapchain_view,
+                &self.texture_bindings,
+            )
+            .map_err(|error| format!("Vello annotation render failed: {error}"))?;
         if let (Some(picker), Some(size)) = (picker, picker_size) {
             let render_size = vello_hybrid::RenderSize {
                 width: u32::from(size[0]),
                 height: u32::from(size[1]),
             };
-            if let Err(error) = self.picker_renderer.render(
-                &self.picker_scene,
-                &mut self.picker_resources,
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                &render_size,
-                &self.picker_target.as_ref().unwrap().view,
-                &self.texture_bindings,
-            ) {
-                eprintln!("vellum: Vello picker render failed: {error}");
-                return false;
-            }
+            self.picker_renderer
+                .render(
+                    &self.picker_scene,
+                    &mut self.picker_resources,
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &render_size,
+                    &self.picker_target.as_ref().unwrap().view,
+                    &self.texture_bindings,
+                )
+                .map_err(|error| format!("Vello picker render failed: {error}"))?;
             let left = picker_origin[0].max(0.0);
             let top = picker_origin[1].max(0.0);
             let right = (picker_origin[0] + picker.size[0] as f32 * scale[0] as f32)
@@ -512,16 +504,15 @@ impl WgpuState {
                 self.composite_picker(
                     &mut encoder,
                     &swapchain_view,
-                    wgpu::LoadOp::Load,
                     self.picker_target.as_ref().unwrap(),
-                    Some([left, top, right - left, bottom - top]),
+                    [left, top, right - left, bottom - top],
                 );
             }
         }
         self.queue.submit(Some(encoder.finish()));
         before_present();
         output.present();
-        true
+        Ok(true)
     }
 
     pub fn release_picker_target(&mut self) {
@@ -529,44 +520,39 @@ impl WgpuState {
     }
 }
 
-fn checked_scene_size(size: [u32; 2], label: &str) -> Option<[u16; 2]> {
-    let width = size[0].try_into().ok();
-    let height = size[1].try_into().ok();
-    match (width, height) {
-        (Some(width), Some(height)) => Some([width, height]),
-        _ => {
-            eprintln!(
-                "vellum: {label} target {}x{} exceeds Vello Hybrid's u16 scene dimensions",
-                size[0], size[1]
-            );
-            None
-        }
+fn checked_target_size(
+    device: &wgpu::Device,
+    size: [u32; 2],
+    label: &str,
+) -> Result<[u16; 2], String> {
+    let limit = device
+        .limits()
+        .max_texture_dimension_2d
+        .min(u32::from(u16::MAX));
+    if size
+        .iter()
+        .any(|dimension| *dimension == 0 || *dimension > limit)
+    {
+        return Err(format!(
+            "{label} target {}x{} must have dimensions in 1..={limit}",
+            size[0], size[1]
+        ));
     }
+    Ok([size[0] as u16, size[1] as u16])
 }
 
-fn checked_picker_scene_size(size: [u32; 2]) -> Option<[u16; 2]> {
-    let width = size[0]
-        .checked_mul(PICKER_RENDER_SCALE)
-        .and_then(|value| value.try_into().ok());
-    let height = size[1]
-        .checked_mul(PICKER_RENDER_SCALE)
-        .and_then(|value| value.try_into().ok());
-    match (width, height) {
-        (Some(width), Some(height)) => Some([width, height]),
-        _ => {
-            eprintln!(
-                "vellum: picker target {}x{} at {}x exceeds Vello Hybrid's u16 scene dimensions",
-                size[0], size[1], PICKER_RENDER_SCALE
-            );
-            None
-        }
-    }
+fn checked_picker_scene_size(device: &wgpu::Device, size: [u32; 2]) -> Result<[u16; 2], String> {
+    let scaled = size.map(|dimension| dimension.checked_mul(PICKER_RENDER_SCALE));
+    let [Some(width), Some(height)] = scaled else {
+        return Err(format!(
+            "picker target {}x{} overflows at {PICKER_RENDER_SCALE}x scale",
+            size[0], size[1]
+        ));
+    };
+    checked_target_size(device, [width, height], "picker")
 }
 
 fn replay_geometry(scene: &mut vello_hybrid::Scene, geometry: &Geometry, target_is_srgb: bool) {
-    if geometry.is_empty() {
-        return;
-    }
     for command in &geometry.commands {
         match command {
             DrawCommand::Fill {
@@ -575,10 +561,7 @@ fn replay_geometry(scene: &mut vello_hybrid::Scene, geometry: &Geometry, target_
                 color,
             } => {
                 scene.set_paint(vello_color(*color, target_is_srgb));
-                scene.set_fill_rule(match fill_rule {
-                    FillRule::NonZero => peniko::Fill::NonZero,
-                    FillRule::EvenOdd => peniko::Fill::EvenOdd,
-                });
+                scene.set_fill_rule(*fill_rule);
                 scene.fill_path(path);
             }
             DrawCommand::Stroke {
@@ -587,7 +570,7 @@ fn replay_geometry(scene: &mut vello_hybrid::Scene, geometry: &Geometry, target_
                 color,
             } => {
                 scene.set_paint(vello_color(*color, target_is_srgb));
-                scene.set_stroke(stroke.as_kurbo());
+                scene.set_stroke(stroke.clone());
                 scene.stroke_path(path);
             }
         }

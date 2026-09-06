@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use wayland_client::Connection;
 use wayland_client::Dispatch;
@@ -27,7 +27,7 @@ use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_seat_v2::EVT_PAD_ADDE
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_seat_v2::EVT_TABLET_ADDED_OPCODE;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_seat_v2::EVT_TOOL_ADDED_OPCODE;
 
-use super::super::draw::{Cursor, Point, ToolOverride};
+use super::super::draw::{Cursor, DrawState, Point, ToolOverride};
 use super::super::{OutputId, State};
 use super::pointer::cursor_shape;
 use super::short_click;
@@ -45,15 +45,21 @@ struct PadGroup {
 
 #[derive(Default)]
 pub(in crate::state) struct TabletState {
-    event_sequence: EventSequence,
-
     _tablet_seat: Option<ZwpTabletSeatV2>,
     pad_groups: HashMap<ObjectId, Vec<ZwpTabletPadGroupV2>>,
     group_controls: HashMap<ObjectId, PadGroup>,
-    tablet_cursor_shape_devices: HashMap<ObjectId, WpCursorShapeDeviceV1>,
-    cursor_serials: HashMap<ObjectId, u32>,
-    current_cursors: HashMap<ObjectId, Cursor>,
-    eraser_tools: HashSet<ObjectId>,
+    tools: HashMap<ZwpTabletToolV2, ToolState>,
+    gesture_owner: Option<ZwpTabletToolV2>,
+    cursor_tool: Option<ZwpTabletToolV2>,
+}
+
+#[derive(Default)]
+struct ToolState {
+    event_sequence: EventSequence,
+    cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+    cursor_serial: Option<u32>,
+    current_cursor: Option<Cursor>,
+    eraser: bool,
     output: Option<OutputId>,
     pos: Option<(f64, f64)>,
     pen_held: bool,
@@ -61,11 +67,7 @@ pub(in crate::state) struct TabletState {
     button_press_time: Option<u32>,
 }
 
-impl TabletState {
-    pub(in crate::state) fn set_tablet_seat(&mut self, tablet_seat: ZwpTabletSeatV2) {
-        self._tablet_seat = Some(tablet_seat);
-    }
-
+impl ToolState {
     fn update_state(&mut self, sequence: EventSequence) {
         if let Some(new_pos) = sequence.motion {
             self.pos = Some(new_pos);
@@ -76,18 +78,16 @@ impl TabletState {
     }
 
     fn refresh_cursor(&mut self, tablet_tool: &ZwpTabletToolV2, cursor: Cursor) {
-        let id = tablet_tool.id();
-        let Some(&serial) = self.cursor_serials.get(&id) else {
+        let Some(serial) = self.cursor_serial else {
             return;
         };
         if self
-            .current_cursors
-            .get(&id)
+            .current_cursor
             .is_some_and(|current| current.same_compositor_cursor(cursor))
         {
             return;
         }
-        let Some(device) = self.tablet_cursor_shape_devices.get(&id) else {
+        let Some(device) = &self.cursor_shape_device else {
             return;
         };
         match cursor {
@@ -95,35 +95,94 @@ impl TabletState {
             Cursor::Shape(hint) => device.set_shape(serial, cursor_shape(hint)),
             Cursor::Tool(_) => tablet_tool.set_cursor(serial, None, 0, 0),
         }
-        self.current_cursors.insert(id, cursor);
+        self.current_cursor = Some(cursor);
+    }
+}
+
+impl TabletState {
+    pub(in crate::state) fn set_tablet_seat(&mut self, tablet_seat: ZwpTabletSeatV2) {
+        self._tablet_seat = Some(tablet_seat);
     }
 
-    pub(in crate::state) fn cursor_active(&self) -> bool {
-        !self.cursor_serials.is_empty()
+    pub(in crate::state) fn refresh_cursor(&mut self, draw: &mut DrawState) -> Option<bool> {
+        let tablet_tool = self
+            .gesture_owner
+            .as_ref()
+            .or(self.cursor_tool.as_ref())
+            .filter(|id| {
+                self.tools
+                    .get(*id)
+                    .is_some_and(|tool| tool.cursor_serial.is_some() && tool.output.is_some())
+            })
+            .cloned()
+            .or_else(|| {
+                self.tools
+                    .iter()
+                    .find(|(_, tool)| tool.cursor_serial.is_some() && tool.output.is_some())
+                    .map(|(id, _)| id.clone())
+            })?;
+        let tool = self.tools.get_mut(&tablet_tool)?;
+        let (x, y) = tool.pos?;
+        let point = Point::new(x as f32, y as f32);
+        let tool_override =
+            ToolOverride::from_eraser(tool.eraser || (tool.button_held && tool.pen_held));
+        let cursor = draw.cursor(point, tool_override);
+        let changed = draw.set_tool_cursor(match cursor {
+            Cursor::Tool(preview) if tool.cursor_shape_device.is_some() => Some((point, preview)),
+            _ => None,
+        });
+        tool.refresh_cursor(&tablet_tool, cursor);
+        self.cursor_tool = Some(tablet_tool);
+        Some(changed)
     }
 
     pub(in crate::state) fn input_grab_active(&self) -> bool {
-        self.pen_held || self.button_held
+        self.gesture_owner.is_some()
     }
 
     pub(in crate::state) fn cancel_gesture(&mut self) {
-        self.pen_held = false;
-        self.button_held = false;
-        self.button_press_time = None;
-    }
-
-    fn tool_cursor_supported(&self, tablet_tool: &ZwpTabletToolV2) -> bool {
-        self.tablet_cursor_shape_devices
-            .contains_key(&tablet_tool.id())
+        self.gesture_owner = None;
+        for tool in self.tools.values_mut() {
+            tool.event_sequence.pressed = 0;
+            tool.event_sequence.released = 0;
+            tool.pen_held = false;
+            tool.button_held = false;
+            tool.button_press_time = None;
+        }
     }
 
     pub(in crate::state) fn restore_cursors(&mut self) {
-        for (id, serial) in &self.cursor_serials {
-            if let Some(device) = self.tablet_cursor_shape_devices.get(id) {
-                device.set_shape(*serial, Shape::Default);
+        for tool in self.tools.values_mut() {
+            if let (Some(serial), Some(device)) = (tool.cursor_serial, &tool.cursor_shape_device) {
+                device.set_shape(serial, Shape::Default);
             }
+            tool.current_cursor = None;
         }
-        self.current_cursors.clear();
+    }
+
+    pub(in crate::state) fn remove_output(&mut self, output: OutputId) -> Option<(f64, f64)> {
+        let mut end_position = None;
+        for (id, tool) in &mut self.tools {
+            if tool.output != Some(output) {
+                continue;
+            }
+            if self.gesture_owner.as_ref() == Some(id) {
+                end_position = tool.pos;
+                self.gesture_owner = None;
+            }
+            if self.cursor_tool.as_ref() == Some(id) {
+                self.cursor_tool = None;
+            }
+            tool.event_sequence = EventSequence::default();
+            tool.output = None;
+            tool.pos = None;
+            tool.cursor_serial = None;
+            tool.current_cursor = None;
+            tool.pen_held = false;
+            tool.button_held = false;
+            tool.button_press_time = None;
+        }
+        end_position
     }
 }
 
@@ -138,14 +197,18 @@ impl Dispatch<ZwpTabletSeatV2, (), State> for TabletState {
     ) {
         use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_seat_v2::Event;
         if let Event::ToolAdded { id } = event {
-            let object_id = id.id();
-            if let Some(manager) = &state.wayland.cursor_shape_manager {
-                let device = manager.get_tablet_tool_v2(&id, qhandle, ());
-                state
-                    .tablet
-                    .tablet_cursor_shape_devices
-                    .insert(object_id.clone(), device);
-            }
+            let cursor_shape_device = state
+                .wayland
+                .cursor_shape_manager
+                .as_ref()
+                .map(|manager| manager.get_tablet_tool_v2(&id, qhandle, ()));
+            state.tablet.tools.insert(
+                id,
+                ToolState {
+                    cursor_shape_device,
+                    ..Default::default()
+                },
+            );
         }
     }
 
@@ -267,143 +330,165 @@ impl Dispatch<ZwpTabletToolV2, (), State> for TabletState {
         _qhandle: &QueueHandle<State>,
     ) {
         use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_tool_v2::{Event, Type};
-        if let Event::ProximityIn { surface, .. } = &event
-            && let Some(output) = state.output_for_surface(surface)
-        {
-            state.focus_output(output);
-            state.tablet.output = Some(output);
+        if !state.active && matches!(event, Event::Down { .. } | Event::Up | Event::Button { .. }) {
+            return;
         }
-        match &event {
-            Event::Removed => {
-                if let Some(device) = state
-                    .tablet
-                    .tablet_cursor_shape_devices
-                    .remove(&tablet_tool.id())
-                {
-                    device.destroy();
+        let id = tablet_tool.clone();
+        if let Event::Removed = event {
+            if state.tablet.gesture_owner.as_ref() == Some(&id) {
+                if let Some(pos) = state.tablet.tools.get(&id).and_then(|tool| tool.pos) {
+                    state.pointer_up(pos, state.modifiers(), false);
                 }
-                state.tablet.cursor_serials.remove(&tablet_tool.id());
-                state.tablet.current_cursors.remove(&tablet_tool.id());
-                state.tablet.eraser_tools.remove(&tablet_tool.id());
-                tablet_tool.destroy();
-                state.refresh_pointer_cursor();
-                return;
+                state.tablet.gesture_owner = None;
             }
-            Event::Type {
-                tool_type: WEnum::Value(Type::Eraser),
-            } => {
-                state.tablet.eraser_tools.insert(tablet_tool.id());
+            if let Some(tool) = state.tablet.tools.remove(&id)
+                && let Some(device) = tool.cursor_shape_device
+            {
+                device.destroy();
             }
-            Event::Type { .. } => {
-                state.tablet.eraser_tools.remove(&tablet_tool.id());
+            if state.tablet.cursor_tool.as_ref() == Some(&id) {
+                state.tablet.cursor_tool = None;
             }
-            _ => {}
+            tablet_tool.destroy();
+            state.refresh_cursor();
+            state.update_output_input();
+            return;
         }
-        let origin = state
-            .tablet
-            .output
+        if let Event::ProximityIn { surface, .. } = &event {
+            let output = state.output_for_surface(surface);
+            state.tablet.tools.entry(id.clone()).or_default().output = output;
+        }
+        let tool = state.tablet.tools.entry(id.clone()).or_default();
+        if let Event::Type { tool_type } = &event {
+            tool.eraser = matches!(tool_type, WEnum::Value(Type::Eraser));
+        }
+        let output = tool.output;
+        let origin = output
             .map(|output| state.output_origin(output))
             .unwrap_or_default();
-        if let Some(sequence) = state
-            .tablet
+        let tool = state.tablet.tools.get_mut(&id).unwrap();
+        if let Some(sequence) = tool
             .event_sequence
             .dispatch(event, (f64::from(origin.x), f64::from(origin.y)))
         {
-            state.tablet.update_state(sequence);
+            tool.update_state(sequence);
             if let Some(serial) = sequence.enter_serial {
-                state.tablet.cursor_serials.insert(tablet_tool.id(), serial);
-                state.tablet.current_cursors.remove(&tablet_tool.id());
+                tool.cursor_serial = Some(serial);
+                tool.current_cursor = None;
             }
             if sequence.proximity_out {
-                state.tablet.cursor_serials.remove(&tablet_tool.id());
-                state.tablet.current_cursors.remove(&tablet_tool.id());
-                state.tablet.output = None;
+                tool.cursor_serial = None;
+                tool.current_cursor = None;
+                tool.output = None;
+            }
+            if !state.active || output.is_none() {
+                tool.pen_held = false;
+                tool.button_held = false;
+                tool.button_press_time = None;
+                return;
             }
             let pen_pressed = sequence.pressed(PEN);
             let pen_released = sequence.released(PEN);
             let button_pressed = sequence.pressed(BUTTON);
             let button_released = sequence.released(BUTTON);
-            let eraser = state.tablet.eraser_tools.contains(&tablet_tool.id());
+            let eraser = tool.eraser;
             if button_pressed {
-                state.tablet.button_press_time = Some(sequence.time);
+                tool.button_press_time = Some(sequence.time);
             }
-            let short_button_click = button_released
-                && short_click(state.tablet.button_press_time.take(), Some(sequence.time));
-
-            let modifiers = state.modifiers();
-            if button_pressed && let Some(pos) = state.tablet.pos {
-                if state.tablet.pen_held {
-                    state.pointer_up(pos, modifiers, false);
-                    state.pointer_down(pos, modifiers, ToolOverride::Eraser);
-                } else {
-                    state.toggle_picker(pos);
-                }
+            let short_button_click =
+                button_released && short_click(tool.button_press_time.take(), Some(sequence.time));
+            let pos = tool.pos;
+            let pen_held = tool.pen_held;
+            let button_held = tool.button_held;
+            if sequence.proximity_out {
+                tool.pen_held = false;
+                tool.button_held = false;
+                tool.button_press_time = None;
             }
-            if pen_pressed
-                && !button_pressed
-                && let Some(pos) = state.tablet.pos
+            if state
+                .tablet
+                .gesture_owner
+                .as_ref()
+                .is_some_and(|owner| owner != &id)
             {
-                if eraser {
-                    state.dismiss_picker();
-                }
-                state.pointer_down(
-                    pos,
-                    modifiers,
-                    ToolOverride::from_eraser(eraser || state.tablet.button_held),
-                );
+                return;
             }
-            if button_released
-                && state.tablet.pen_held
-                && !pen_released
-                && let Some(pos) = state.tablet.pos
-            {
-                state.pointer_up(pos, modifiers, false);
-                state.pointer_down(pos, modifiers, ToolOverride::from_eraser(eraser));
-            } else if button_released
-                && state.draw.picker_active()
-                && let Some(pos) = state.tablet.pos
-            {
-                state.pointer_up(pos, modifiers, short_button_click);
-            }
-            if !button_pressed
-                && !button_released
-                && sequence.motion.is_some()
-                && (state.tablet.pen_held
-                    || (state.draw.picker_active() && state.tablet.button_held))
-                && let Some(pos) = state.tablet.pos
-            {
-                state.pointer_motion(pos, modifiers);
-            }
-            if pen_released && let Some(pos) = state.tablet.pos {
-                state.pointer_up(pos, modifiers, false);
+            if (pen_pressed || button_pressed) && pos.is_some() {
+                state.tablet.gesture_owner = Some(id.clone());
             }
             if !sequence.proximity_out {
-                let (x, y) = state.tablet.pos.unwrap_or_default();
-                let tool_override = ToolOverride::from_eraser(
-                    eraser || (state.tablet.button_held && state.tablet.pen_held),
-                );
-                let cursor = state
-                    .draw
-                    .cursor(Point::new(x as f32, y as f32), tool_override);
-                let point = Point::new(x as f32, y as f32);
-                let preview_changed = state.draw.set_tool_cursor(match cursor {
-                    Cursor::Tool(preview)
-                        if state.active && state.tablet.tool_cursor_supported(tablet_tool) =>
-                    {
-                        Some((point, preview))
-                    }
-                    _ => None,
-                });
-                if state.active {
-                    state.tablet.refresh_cursor(tablet_tool, cursor);
-                }
-                if preview_changed {
-                    state.request_render();
-                }
-            } else {
-                state.refresh_pointer_cursor();
+                state.tablet.cursor_tool = Some(id.clone());
+            } else if state.tablet.cursor_tool.as_ref() == Some(&id) {
+                state.tablet.cursor_tool = None;
             }
-            if pen_pressed || pen_released || button_pressed || button_released {
+            if let Some(output) = output {
+                state.focus_output(output);
+            }
+            let modifiers = state.modifiers();
+            if state.tablet.gesture_owner.as_ref() == Some(&id) {
+                if button_pressed && let Some(pos) = pos {
+                    if pen_held {
+                        state.pointer_up(pos, modifiers, false);
+                        state.pointer_down(pos, modifiers, ToolOverride::Eraser);
+                    } else {
+                        state.toggle_picker(pos);
+                    }
+                }
+                if pen_pressed
+                    && !button_pressed
+                    && let Some(pos) = pos
+                {
+                    if eraser {
+                        state.dismiss_picker();
+                    }
+                    state.pointer_down(
+                        pos,
+                        modifiers,
+                        ToolOverride::from_eraser(eraser || button_held),
+                    );
+                }
+                if button_released
+                    && pen_held
+                    && !pen_released
+                    && let Some(pos) = pos
+                {
+                    state.pointer_up(pos, modifiers, false);
+                    state.pointer_down(pos, modifiers, ToolOverride::from_eraser(eraser));
+                } else if button_released
+                    && state.draw.picker_active()
+                    && let Some(pos) = pos
+                {
+                    state.pointer_up(pos, modifiers, short_button_click);
+                }
+                if !button_pressed
+                    && !button_released
+                    && sequence.motion.is_some()
+                    && (pen_held || (state.draw.picker_active() && button_held))
+                    && let Some(pos) = pos
+                {
+                    state.pointer_motion(pos, modifiers);
+                }
+                if pen_released && let Some(pos) = pos {
+                    state.pointer_up(pos, modifiers, false);
+                }
+            }
+            if sequence.proximity_out
+                && !pen_released
+                && state.tablet.gesture_owner.as_ref() == Some(&id)
+                && let Some(pos) = pos
+            {
+                state.pointer_up(pos, modifiers, false);
+            }
+            if sequence.proximity_out || (!pen_held && !button_held) {
+                state.tablet.gesture_owner = None;
+            }
+            state.refresh_cursor();
+            if pen_pressed
+                || pen_released
+                || button_pressed
+                || button_released
+                || sequence.proximity_out
+            {
                 state.update_output_input();
             }
         }
@@ -479,9 +564,7 @@ impl EventSequence {
             }
             Event::Frame { time } => {
                 self.time = time;
-                let mut tmp = Self::default();
-                std::mem::swap(self, &mut tmp);
-                Some(tmp)
+                Some(std::mem::take(self))
             }
             _ => None,
         }

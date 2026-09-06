@@ -80,19 +80,9 @@ impl std::str::FromStr for Tool {
     type Err = &'static str;
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
-        match name {
-            "pen" => Ok(Self::Pen),
-            "line" => Ok(Self::Line),
-            "arrow" => Ok(Self::Arrow),
-            "triangle" => Ok(Self::Triangle),
-            "rectangle" => Ok(Self::Rectangle),
-            "ellipse" => Ok(Self::Ellipse),
-            "text" => Ok(Self::Text),
-            "eraser" => Ok(Self::Eraser),
-            "select" => Ok(Self::Select),
-            _ => Err(
-                "default tool must be pen, line, arrow, triangle, rectangle, ellipse, text, eraser, or select",
-            ),
-        }
+        <Self as serde::Deserialize>::deserialize(serde::de::value::StrDeserializer::new(name))
+            .map_err(|_: serde::de::value::Error| {
+                "default tool must be pen, line, arrow, triangle, rectangle, ellipse, text, eraser, or select"
+            })
     }
 }

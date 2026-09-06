@@ -2,8 +2,9 @@ use std::ops::Range;
 
 use super::scene::Point;
 use super::tool::Tool;
-use crate::render::{FillRule, Geometry, LocalGeometry, StrokeStyle};
+use crate::render::{Geometry, LocalGeometry};
 use kurbo::{Arc, BezPath, Circle, Shape};
+use peniko::Fill;
 
 const CENTER_RADIUS: f32 = 26.0;
 const COLOR_OUTER_RADIUS: f32 = 78.0;
@@ -89,15 +90,15 @@ fn radial_point(center: Point, radius: f32, angle: f32) -> kurbo::Point {
 }
 
 fn push_disc(output: &mut Geometry, center: Point, radius: f32, color: [f32; 4]) {
-    output.append(Geometry::fill(
+    output.push_fill(
         Circle::new(
             (f64::from(center.x), f64::from(center.y)),
             f64::from(radius),
         )
         .to_path(0.02),
-        FillRule::NonZero,
+        Fill::NonZero,
         color,
-    ));
+    );
 }
 
 fn push_color_preview(output: &mut Geometry, center: Point, color: [f32; 4]) {
@@ -126,16 +127,11 @@ fn push_wedge(
     let inner_end = angles.end - inner_inset;
     let outer_start = angles.start + outer_inset;
     let outer_end = angles.end - outer_inset;
-    let center = (f64::from(center.x), f64::from(center.y));
     let mut path = BezPath::new();
-    path.move_to(radial_point(
-        Point::new(center.0 as f32, center.1 as f32),
-        inner,
-        inner_start,
-    ));
+    path.move_to(radial_point(center, inner, inner_start));
     path.extend(
         Arc::new(
-            center,
+            (f64::from(center.x), f64::from(center.y)),
             (f64::from(inner), f64::from(inner)),
             f64::from(inner_start),
             f64::from(inner_end - inner_start),
@@ -143,14 +139,10 @@ fn push_wedge(
         )
         .append_iter(0.02),
     );
-    path.line_to(radial_point(
-        Point::new(center.0 as f32, center.1 as f32),
-        outer,
-        outer_end,
-    ));
+    path.line_to(radial_point(center, outer, outer_end));
     path.extend(
         Arc::new(
-            center,
+            (f64::from(center.x), f64::from(center.y)),
             (f64::from(outer), f64::from(outer)),
             f64::from(outer_end),
             f64::from(outer_start - outer_end),
@@ -159,7 +151,7 @@ fn push_wedge(
         .append_iter(0.02),
     );
     path.close_path();
-    output.append(Geometry::fill(path, FillRule::NonZero, color));
+    output.push_fill(path, Fill::NonZero, color);
 }
 
 fn push_palette(
@@ -210,7 +202,7 @@ pub(super) fn picker_geometry(
     tool_fills: ShapeFills,
     palette: &[[f32; 4]],
 ) -> LocalGeometry {
-    let mut output = Geometry::empty();
+    let mut output = Geometry::default();
     let origin = [
         (center.x - PICKER_LAYER_SIZE as f32 * 0.5).floor(),
         (center.y - PICKER_LAYER_SIZE as f32 * 0.5).floor(),
@@ -342,7 +334,7 @@ fn push_tool_icon(output: &mut Geometry, center: Point, tool: Tool, filled: bool
     }
     let icon_color = [0.96, 0.97, 1.0, 1.0];
     if filled {
-        output.append(Geometry::fill(path.clone(), FillRule::NonZero, icon_color));
+        output.push_fill(path.clone(), Fill::NonZero, icon_color);
     }
-    output.append(Geometry::stroke(path, StrokeStyle::round(2.0), icon_color));
+    output.push_stroke(path, kurbo::Stroke::new(2.0), icon_color);
 }

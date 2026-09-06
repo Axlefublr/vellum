@@ -8,7 +8,7 @@ use super::Modifiers;
 use super::history::{Entry as HistoryEntry, History};
 use super::picker::{Choice, Picker, ShapeFills, choice, picker_geometry};
 use super::scene::{Element, geometry};
-use super::scene::{ElementId, ElementKind, EndMarker, Point, Style};
+use super::scene::{ElementId, ElementKind, Point, Style};
 use super::selection;
 use super::text_edit::TextEdit;
 pub(crate) use super::text_edit::{CursorMove, TextInputBatch};
@@ -32,35 +32,9 @@ pub(crate) enum Action {
     ApplyTextInput(TextInputBatch),
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Damage {
-    #[default]
-    None,
-    Preview,
-    Scene,
-}
-
-impl Damage {
-    pub fn merge(&mut self, other: Self) {
-        *self = (*self).max(other);
-    }
-
-    pub fn changed(self) -> bool {
-        self != Self::None
-    }
-
-    fn from_preview(changed: bool) -> Self {
-        if changed { Self::Preview } else { Self::None }
-    }
-
-    fn from_scene(changed: bool) -> Self {
-        if changed { Self::Scene } else { Self::None }
-    }
-}
-
 #[derive(Default)]
 pub struct EditorEffect {
-    pub damage: Damage,
+    pub changed: bool,
     pub deactivate: bool,
     pub feedback: Option<String>,
 }
@@ -131,31 +105,18 @@ impl Editor {
         }
     }
 
-    pub fn activate(&mut self) -> Damage {
+    pub fn activate(&mut self) -> bool {
         if self.remember_last_tool || self.tool == self.default_tool {
-            return Damage::None;
+            return false;
         }
         self.switch_tool(self.default_tool)
     }
 
-    pub fn deactivate(&mut self) -> Damage {
-        let damage = if self.is_editing_text() {
-            self.commit_text()
-        } else {
-            let restore_scene = matches!(
-                self.interaction,
-                Some(Interaction::Moving { .. } | Interaction::Resizing { .. })
-            );
-            let changed = self.interaction.take().is_some();
-            if restore_scene {
-                Damage::Scene
-            } else {
-                Damage::from_preview(changed)
-            }
-        };
+    pub fn deactivate(&mut self) -> bool {
+        let changed = self.finish_interaction();
         let clear_preview =
             !std::mem::take(&mut self.selected).is_empty() | self.picker.take().is_some();
-        damage.max(Damage::from_preview(clear_preview))
+        changed | clear_preview
     }
 
     pub fn is_editing_text(&self) -> bool {
@@ -166,7 +127,7 @@ impl Editor {
         matches!(self.interaction, Some(Interaction::Freehand(_)))
     }
 
-    fn text_edit(&self) -> Option<&TextEdit> {
+    pub(super) fn text_edit(&self) -> Option<&TextEdit> {
         match &self.interaction {
             Some(Interaction::EditingText(edit)) => Some(edit),
             _ => None,
@@ -199,116 +160,120 @@ impl Editor {
         if let Action::ApplyTextInput(batch) = action {
             let submit = batch.submit;
             if let Some(edit) = self.text_edit_mut() {
-                effect.damage = Damage::from_preview(edit.apply_text_input(batch));
+                effect.changed = edit.apply_text_input(batch);
                 if submit {
-                    effect.damage = effect.damage.max(self.commit_text());
+                    effect.changed |= self.commit_text();
                 }
             }
             return effect;
         }
         let closed_picker = self.picker.take().is_some();
         if closed_picker && matches!(action, Action::Cancel) {
-            effect.damage = Damage::Preview;
+            effect.changed = true;
             return effect;
         }
         match action {
-            Action::Undo if !self.is_editing_text() => effect.damage = self.undo(),
-            Action::Redo if !self.is_editing_text() => effect.damage = self.redo(),
+            Action::Undo if !self.is_editing_text() => effect.changed = self.undo(),
+            Action::Redo if !self.is_editing_text() => effect.changed = self.redo(),
             Action::SelectAll => {
-                effect.damage = if let Some(edit) = self.text_edit_mut() {
-                    Damage::from_preview(edit.select_all())
+                effect.changed = if let Some(edit) = self.text_edit_mut() {
+                    edit.select_all()
                 } else {
                     self.select_all()
                 };
             }
-            Action::ToggleEraser => effect.damage = self.toggle_eraser(),
+            Action::ToggleEraser => effect.changed = self.toggle_eraser(),
             Action::ToggleFill => {
-                let (damage, feedback) = self.toggle_fill();
-                effect.damage = damage;
-                effect.feedback = (!feedback.is_empty()).then_some(feedback);
+                let adjustment = self.toggle_fill();
+                effect.changed = adjustment.changed;
+                effect.feedback = adjustment.feedback;
             }
             Action::Delete => {
                 if let Some(edit) = self.text_edit_mut() {
-                    effect.damage = Damage::from_preview(edit.delete());
+                    effect.changed = edit.delete();
                 } else {
-                    effect.damage = self.delete_selection();
+                    effect.changed = self.delete_selection();
                 }
             }
-            Action::Clear => effect.damage = self.clear(),
+            Action::Clear => effect.changed = self.clear(),
             Action::Cancel => {
                 let cancelled = self.cancel_interaction();
-                if cancelled.changed() || !std::mem::take(&mut self.selected).is_empty() {
-                    effect.damage = cancelled.max(Damage::Preview);
+                if cancelled || !std::mem::take(&mut self.selected).is_empty() {
+                    effect.changed = true;
                 } else {
                     effect.deactivate = true;
                 }
             }
-            Action::CommitText => effect.damage = self.commit_text(),
+            Action::CommitText => effect.changed = self.commit_text(),
             Action::Backspace => {
                 if let Some(edit) = self.text_edit_mut() {
-                    effect.damage = Damage::from_preview(edit.backspace());
+                    effect.changed = edit.backspace();
                 }
             }
             Action::BackspaceWord => {
                 if let Some(edit) = self.text_edit_mut() {
-                    effect.damage = Damage::from_preview(edit.backspace_word());
+                    effect.changed = edit.backspace_word();
                 }
             }
             Action::MoveCursor(movement, extend) => {
                 if let Some(edit) = self.text_edit_mut() {
-                    effect.damage = Damage::from_preview(edit.move_cursor(movement, extend));
+                    effect.changed = edit.move_cursor(movement, extend);
                 }
             }
             Action::InsertText(text) => {
                 if let Some(edit) = self.text_edit_mut() {
-                    effect.damage = Damage::from_preview(edit.insert(&text));
+                    effect.changed = edit.insert(&text);
                 }
             }
-            _ => {}
+            Action::Undo | Action::Redo | Action::ApplyTextInput(_) => {}
         }
-        effect.damage = effect.damage.max(Damage::from_preview(closed_picker));
+        effect.changed |= closed_picker;
         effect
     }
 
-    pub fn open_picker(&mut self, center: Point) -> Damage {
+    pub fn open_picker(&mut self, center: Point) {
         self.picker = Some(Picker {
             center,
             hovered: None,
         });
-        Damage::Preview
     }
 
-    pub fn picker_motion(&mut self, point: Point) -> Damage {
+    pub fn picker_motion(&mut self, point: Point) -> bool {
         let Some(picker) = &mut self.picker else {
-            return Damage::None;
+            return false;
         };
         let choice = choice(picker.center, point, self.palette.len());
         let changed = picker.hovered != choice;
         picker.hovered = choice;
-        Damage::from_preview(changed)
+        changed
     }
 
-    pub fn picker_release(&mut self, point: Point, latch_center: bool) -> Damage {
+    pub fn picker_release(&mut self, point: Point, latch_center: bool) -> bool {
         let Some(picker) = self.picker else {
-            return Damage::None;
+            return false;
         };
         let choice = choice(picker.center, point, self.palette.len());
         if choice.is_none() && latch_center {
-            return Damage::None;
+            return false;
         }
         self.picker = None;
         match choice {
-            Some(Choice::Color(index)) => Damage::Preview.max(self.apply_rgba(self.palette[index])),
-            Some(Choice::Tool(tool)) => Damage::Preview.max(self.switch_tool(tool)),
-            None => Damage::Preview,
+            Some(Choice::Color(index)) => {
+                self.apply_rgba(self.palette[index]);
+            }
+            Some(Choice::Tool(tool)) => {
+                self.switch_tool(tool);
+            }
+            None => {}
         }
+        true
     }
 
-    pub fn dismiss_picker(&mut self) -> Damage {
-        Damage::from_preview(self.picker.take().is_some())
+    pub fn dismiss_picker(&mut self) -> bool {
+        self.picker.take().is_some()
     }
 
-    fn toggle_eraser(&mut self) -> Damage {
+    fn toggle_eraser(&mut self) -> bool {
         let tool = if self.tool == Tool::Eraser {
             self.last_non_eraser_tool
         } else {
@@ -351,17 +316,8 @@ impl Editor {
                 let Some(element) = self.element(*id) else {
                     continue;
                 };
-                let preview = match &self.interaction {
-                    Some(Interaction::Moving {
-                        ids,
-                        start,
-                        current,
-                    }) if ids.contains(id) => Some(element.kind.translated(*current - *start)),
-                    _ => None,
-                };
-                let kind = preview.as_ref().unwrap_or(&element.kind);
-                let element_bounds = element.preview_bounds(kind);
-                let (min, max) = (element_bounds.min, element_bounds.max);
+                let offset = self.moving_offset(*id).unwrap_or_default();
+                let (min, max) = (element.bounds.min + offset, element.bounds.max + offset);
                 bounds = Some(bounds.map_or((min, max), |(current_min, current_max)| {
                     (
                         Point::new(current_min.x.min(min.x), current_min.y.min(min.y)),
@@ -392,17 +348,12 @@ impl Editor {
         let Some(element) = self.element(id) else {
             return;
         };
-        let preview = match &self.interaction {
+        match &self.interaction {
             Some(Interaction::EditingText(edit)) if edit.id == Some(id) => {
                 let bounds = edit.bounds();
                 output.push(selection::outline(bounds.min, bounds.max));
                 return;
             }
-            Some(Interaction::Moving {
-                ids,
-                start,
-                current,
-            }) if ids.contains(&id) => Some(element.kind.translated(*current - *start)),
             Some(Interaction::Resizing {
                 id: resizing_id,
                 current,
@@ -410,21 +361,22 @@ impl Editor {
             }) if *resizing_id == id => {
                 if !matches!(
                     current.kind,
-                    ElementKind::Path { smooth: false, .. } | ElementKind::Triangle { .. }
+                    ElementKind::Segment { .. } | ElementKind::Triangle { .. }
                 ) {
                     output.push(selection::outline(current.bounds.min, current.bounds.max));
                 }
                 return;
             }
-            _ => None,
-        };
-        let kind = preview.as_ref().unwrap_or(&element.kind);
+            _ => {}
+        }
+        let offset = self.moving_offset(id).unwrap_or_default();
+        let kind = &element.kind;
         if !matches!(
             kind,
-            ElementKind::Path { smooth: false, .. } | ElementKind::Triangle { .. }
+            ElementKind::Segment { .. } | ElementKind::Triangle { .. }
         ) {
-            let bounds = element.preview_bounds(kind);
-            output.push(selection::outline(bounds.min, bounds.max));
+            let bounds = element.bounds;
+            output.push(selection::outline(bounds.min + offset, bounds.max + offset));
         }
         if !show_handles {
             return;
@@ -447,10 +399,6 @@ impl Editor {
             },
             &self.palette,
         ))
-    }
-
-    pub(super) fn active_text(&self) -> Option<&TextEdit> {
-        self.text_edit()
     }
 
     pub(super) fn clear_preedit(&mut self) -> bool {
@@ -509,30 +457,29 @@ impl Editor {
             .then_some((&current.kind, current.style))
     }
 
-    fn switch_tool(&mut self, tool: Tool) -> Damage {
+    fn switch_tool(&mut self, tool: Tool) -> bool {
         if self.tool == tool {
-            return Damage::None;
+            return false;
         }
-        let damage = self.finish_interaction().max(Damage::Preview);
+        self.finish_interaction();
         self.selected.clear();
         self.tool = tool;
         if tool != Tool::Eraser {
             self.last_non_eraser_tool = tool;
         }
         self.sync_active_style();
-        damage
+        true
     }
 }
 
 fn drawing_kind(tool: Tool, start: Point, current: Point, modifiers: Modifiers) -> ElementKind {
     match tool {
-        Tool::Line | Tool::Arrow => ElementKind::Path {
-            points: vec![
+        Tool::Line | Tool::Arrow => ElementKind::Segment {
+            points: [
                 start,
                 selection::constrained_endpoint(start, current, modifiers.shift),
             ],
-            smooth: false,
-            end_marker: (tool == Tool::Arrow).then_some(EndMarker::Arrow),
+            arrow: tool == Tool::Arrow,
         },
         Tool::Triangle => ElementKind::Triangle {
             vertices: selection::triangle_from_drag(start, current, modifiers),
