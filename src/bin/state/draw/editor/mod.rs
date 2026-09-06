@@ -10,8 +10,8 @@ use super::picker::{Choice, Picker, ShapeFills, choice, picker_geometry};
 use super::scene::{Element, geometry};
 use super::scene::{ElementId, ElementKind, EndMarker, Point, Style};
 use super::selection;
-pub(crate) use super::text_edit::CursorMove;
 use super::text_edit::TextEdit;
+pub(crate) use super::text_edit::{CursorMove, TextInputBatch};
 use super::tool::Tool;
 use crate::render::Geometry;
 
@@ -29,6 +29,7 @@ pub(crate) enum Action {
     BackspaceWord,
     MoveCursor(CursorMove, bool),
     InsertText(String),
+    ApplyTextInput(TextInputBatch),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -72,6 +73,7 @@ pub struct Editor {
     interaction: Option<Interaction>,
     history: History,
     next_id: ElementId,
+    next_text_session: u64,
     picker: Option<Picker>,
     default_tool: Tool,
     last_non_eraser_tool: Tool,
@@ -113,6 +115,7 @@ impl Editor {
             interaction: None,
             history: History::default(),
             next_id: 1,
+            next_text_session: 1,
             picker: None,
             default_tool: settings.default_tool,
             last_non_eraser_tool: if settings.default_tool == Tool::Eraser {
@@ -193,6 +196,16 @@ impl Editor {
 
     pub fn handle_action(&mut self, action: Action) -> EditorEffect {
         let mut effect = EditorEffect::default();
+        if let Action::ApplyTextInput(batch) = action {
+            let submit = batch.submit;
+            if let Some(edit) = self.text_edit_mut() {
+                effect.damage = Damage::from_preview(edit.apply_text_input(batch));
+                if submit {
+                    effect.damage = effect.damage.max(self.commit_text());
+                }
+            }
+            return effect;
+        }
         let closed_picker = self.picker.take().is_some();
         if closed_picker && matches!(action, Action::Cancel) {
             effect.damage = Damage::Preview;
@@ -450,6 +463,10 @@ impl Editor {
         self.text_edit()
     }
 
+    pub(super) fn clear_preedit(&mut self) -> bool {
+        self.text_edit_mut().is_some_and(TextEdit::clear_preedit)
+    }
+
     pub(super) fn make_text_edit(
         &mut self,
         id: Option<ElementId>,
@@ -458,7 +475,9 @@ impl Editor {
         style: Style,
         scale: [f32; 2],
     ) -> TextEdit {
-        TextEdit::new(id, origin, content, style, scale)
+        let session = self.next_text_session;
+        self.next_text_session = self.next_text_session.wrapping_add(1).max(1);
+        TextEdit::new(session, id, origin, content, style, scale)
     }
 
     pub fn element_is_previewed(&self, id: ElementId) -> bool {

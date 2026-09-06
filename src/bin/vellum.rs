@@ -145,6 +145,7 @@ fn run_overlay(settings: Settings) -> Result<(), String> {
         event_queue
             .dispatch_pending(&mut state)
             .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
+        state.sync_text_input();
         let flush_blocked = match event_queue.flush() {
             Ok(()) => false,
             Err(WaylandError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => true,

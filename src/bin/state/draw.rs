@@ -14,12 +14,13 @@ use std::time::{Duration, Instant};
 
 use super::OutputId;
 
-pub(crate) use self::editor::{Action, CursorMove};
+pub(crate) use self::editor::{Action, CursorMove, TextInputBatch};
 use self::editor::{Damage, Editor, EditorEffect};
 use self::scene::ElementKind;
 pub(super) use self::scene::Point;
 pub(crate) use self::selection::CursorHint;
 use self::text_edit::TextEdit;
+pub(crate) use self::text_edit::{Preedit, PreeditHint, PreeditSpan, TextInputSnapshot};
 pub(crate) use self::tool::Tool;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -146,13 +147,14 @@ impl DrawState {
     }
 
     pub fn handle_action(&mut self, action: Action, at: Option<Point>) -> EditorEffect {
+        let user_input = !matches!(action, Action::ApplyTextInput(_));
         let mut effect = self.editor.handle_action(action);
         if let (Some(label), Some(at)) = (effect.feedback.take(), at) {
             self.property_feedback_anchor = Some(at);
             self.feedback = Some((label, at));
             self.feedback_until = Some(Instant::now() + self.feedback_duration);
         }
-        if self.show_caret() {
+        if (user_input || effect.damage.changed()) && self.show_caret() {
             effect.damage = effect.damage.max(Damage::Preview);
         }
         self.record(effect.damage);
@@ -279,6 +281,19 @@ impl DrawState {
         self.damage.remove(&output);
     }
 
+    pub(crate) fn text_input_snapshot(&self) -> Option<TextInputSnapshot<'_>> {
+        self.editor.active_text().map(|edit| edit.snapshot(None))
+    }
+
+    pub(crate) fn clear_preedit(&mut self) -> bool {
+        if self.editor.clear_preedit() {
+            self.show_caret();
+            self.record(Damage::Preview)
+        } else {
+            false
+        }
+    }
+
     pub fn needs_render(&self, output: OutputId) -> bool {
         self.damage
             .get(&output)
@@ -294,6 +309,13 @@ impl DrawState {
 
     pub fn damage_scene(&mut self, output: OutputId) {
         self.damage.entry(output).or_default().merge(Damage::Scene);
+    }
+
+    pub(crate) fn damage_preview(&mut self, output: OutputId) {
+        self.damage
+            .entry(output)
+            .or_default()
+            .merge(Damage::Preview);
     }
 
     fn record(&mut self, damage: Damage) -> bool {
@@ -333,7 +355,13 @@ impl DrawState {
         changed
     }
 
-    pub fn render(&mut self, output: OutputId, origin: Point, wgpu: &mut WgpuState) {
+    pub fn render(
+        &mut self,
+        output: OutputId,
+        origin: Point,
+        wgpu: &mut WgpuState,
+        before_present: impl FnOnce(Option<TextInputSnapshot<'_>>),
+    ) {
         let damage = self.damage.get(&output).copied().unwrap_or_default();
         if !damage.changed() {
             return;
@@ -417,9 +445,16 @@ impl DrawState {
         };
 
         self.previews.clear();
+        let mut cursor_rectangle = None;
         if let Some(edit) = self.editor.active_text() {
             let [scale_x, scale_y] = edit.scale;
             let [x, y] = edit.cursor_position();
+            cursor_rectangle = Some(text_cursor_rectangle(
+                edit.origin,
+                edit.ime_area(),
+                edit.scale,
+                origin,
+            ));
             if self.caret_visible && edit.shows_caret() {
                 self.previews.push(text_caret(
                     edit.origin.x + x * scale_x,
@@ -427,12 +462,13 @@ impl DrawState {
                     edit.style.size * scale_y,
                 ));
             }
-            edit.selection_rectangles(|[x, y, width, height]| {
-                self.previews.push(text_selection(
+            edit.decoration_rectangles(|[x, y, width, height], style| {
+                self.previews.push(text_preedit_span(
                     edit.origin.x + x * scale_x,
                     edit.origin.x + (x + width) * scale_x,
                     edit.origin.y + y * scale_y,
                     height * scale_y,
+                    style,
                 ));
             });
         }
@@ -451,6 +487,13 @@ impl DrawState {
             self.editor
                 .active_text()
                 .map(|edit| (edit.id.unwrap_or(0), edit.layout())),
+            || {
+                before_present(
+                    self.editor
+                        .active_text()
+                        .map(|edit| edit.snapshot(cursor_rectangle)),
+                );
+            },
         ) {
             self.damage.insert(output, Damage::None);
         }
@@ -551,21 +594,68 @@ fn text_caret(left: f32, top: f32, scaled_font_size: f32) -> Geometry {
     geometry
 }
 
-fn text_selection(start: f32, end: f32, top: f32, line_height: f32) -> Geometry {
+fn text_cursor_rectangle(
+    text_origin: Point,
+    area: parley::BoundingBox,
+    [scale_x, scale_y]: [f32; 2],
+    output_origin: Point,
+) -> [i32; 4] {
+    let x0 = text_origin.x + area.x0 as f32 * scale_x - output_origin.x;
+    let y0 = text_origin.y + area.y0 as f32 * scale_y - output_origin.y;
+    let x1 = text_origin.x + area.x1 as f32 * scale_x - output_origin.x;
+    let y1 = text_origin.y + area.y1 as f32 * scale_y - output_origin.y;
+    let left = x0.min(x1).floor();
+    let top = y0.min(y1).floor();
+    [
+        left as i32,
+        top as i32,
+        (x0.max(x1).ceil() - left).max(1.0) as i32,
+        (y0.max(y1).ceil() - top).max(1.0) as i32,
+    ]
+}
+
+fn text_preedit_span(
+    start: f32,
+    end: f32,
+    top: f32,
+    line_height: f32,
+    style: PreeditHint,
+) -> Geometry {
     use kurbo::Shape;
 
     let left = start.min(end);
     let right = start.max(end).max(left + 1.0);
     let bottom = top + line_height;
+    if style == PreeditHint::Selection {
+        return Geometry::fill(
+            kurbo::Rect::new(
+                f64::from(left),
+                f64::from(top.min(bottom)),
+                f64::from(right),
+                f64::from(top.max(bottom)),
+            )
+            .to_path(0.1),
+            FillRule::NonZero,
+            [0.2, 0.45, 1.0, 0.25],
+        );
+    }
+
+    let color = match style {
+        PreeditHint::SpellingError => [1.0, 0.15, 0.1, 1.0],
+        PreeditHint::ComposeError => [1.0, 0.45, 0.05, 1.0],
+        PreeditHint::Prediction => [0.55, 0.55, 0.55, 0.8],
+        _ => [0.2, 0.45, 1.0, 1.0],
+    };
+    let baseline = bottom - 1.5;
     Geometry::fill(
         kurbo::Rect::new(
             f64::from(left),
-            f64::from(top.min(bottom)),
+            f64::from(baseline),
             f64::from(right),
-            f64::from(top.max(bottom)),
+            f64::from(baseline + 1.5),
         )
         .to_path(0.1),
         FillRule::NonZero,
-        [0.2, 0.45, 1.0, 0.25],
+        color,
     )
 }

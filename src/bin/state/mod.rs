@@ -28,6 +28,8 @@ use wayland_client::protocol::wl_surface::WlSurface;
 
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1;
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_manager_v2::ZwpTabletManagerV2;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_v2::ZwpTabletPadV2;
@@ -138,6 +140,7 @@ pub struct State {
     active: bool,
     draw_on: DrawOn,
     selected_output: Option<OutputId>,
+    input_output: Option<OutputId>,
     keyboard_output: Option<OutputId>,
     clear_on_escape: bool,
     pending_pen_motion: PendingPenMotion,
@@ -145,6 +148,7 @@ pub struct State {
     wayland: WaylandState,
     draw: draw::DrawState,
     keyboard: input::KeyboardState,
+    text_input: input::TextInputState,
     pointer: input::PointerState,
     tablet: input::TabletState,
 
@@ -178,6 +182,14 @@ impl State {
         let xdg_output_manager = globals
             .bind::<ZxdgOutputManagerV1, _, _>(&qhandle, 1..=3, ())
             .ok();
+        let text_input = globals
+            .bind::<ZwpTextInputManagerV3, _, _>(&qhandle, 1..=2, ())
+            .ok()
+            .map(|manager| {
+                let text_input = manager.get_text_input(&seat, &qhandle, ());
+                manager.destroy();
+                text_input
+            });
         let output_globals = globals.contents().clone_list();
         let draw_on = settings.draw_on;
         let clear_on_escape = settings.clear_on_escape;
@@ -186,6 +198,7 @@ impl State {
             active: false,
             draw_on,
             selected_output: None,
+            input_output: None,
             keyboard_output: None,
             clear_on_escape,
             pending_pen_motion: PendingPenMotion::default(),
@@ -199,12 +212,14 @@ impl State {
                 outputs: BTreeMap::new(),
                 pointer: None,
                 keyboard: None,
+                text_input,
                 cursor_shape_manager,
                 tablet_manager,
                 xdg_output_manager,
             },
             draw: draw::DrawState::new(settings),
             keyboard: input::KeyboardState::default(),
+            text_input: input::TextInputState::default(),
             pointer: input::PointerState::default(),
             tablet: input::TabletState::default(),
             gpu: None,
@@ -296,9 +311,13 @@ impl State {
             output.output.release();
         }
         self.draw.remove_output(id);
+        self.text_input_output_removed(id);
 
         if self.selected_output == Some(id) {
             self.selected_output = None;
+        }
+        if self.input_output == Some(id) {
+            self.input_output = self.wayland.outputs.keys().next().copied();
         }
         if self.keyboard_output == Some(id) {
             self.keyboard_output = self.wayland.outputs.keys().next().copied();
@@ -320,8 +339,32 @@ impl State {
             }
             self.selected_output = Some(output);
         }
+        self.input_output = Some(output);
+        if self.draw.is_editing_text() {
+            return;
+        }
         self.keyboard_output = Some(output);
         self.update_output_input();
+    }
+
+    fn restore_keyboard_focus(&mut self) {
+        if self.draw.is_editing_text() {
+            return;
+        }
+        self.focus_keyboard_on_input();
+    }
+
+    fn focus_keyboard_on_input(&mut self) {
+        let Some(output) = self
+            .input_output
+            .filter(|output| self.wayland.outputs.contains_key(output))
+        else {
+            return;
+        };
+        if self.keyboard_output != Some(output) {
+            self.keyboard_output = Some(output);
+            self.update_output_input();
+        }
     }
 
     fn output_for_surface(&self, surface: &WlSurface) -> Option<OutputId> {
@@ -443,7 +486,12 @@ impl State {
         if let Some(output_state) = self.wayland.outputs.get_mut(&output)
             && let Some(wgpu) = output_state.wgpu.as_mut()
         {
-            self.draw.render(output, output_state.origin, wgpu);
+            let text_input = &mut self.text_input;
+            let proxy = self.wayland.text_input.as_ref();
+            self.draw
+                .render(output, output_state.origin, wgpu, |snapshot| {
+                    text_input.sync_render(proxy, output, snapshot);
+                });
             if !self.active {
                 wgpu.release_picker_target();
             }
@@ -466,6 +514,7 @@ impl State {
             }
             self.deactivate();
         }
+        self.restore_keyboard_focus();
         self.refresh_pointer_cursor();
     }
 
@@ -511,6 +560,7 @@ impl State {
             }
             return;
         }
+        self.focus_keyboard_on_input();
         let changed = self.draw.pointer_down(point, modifiers, tool_override);
         if self.draw.is_drawing_pen() {
             self.pending_pen_motion.reset(Some(point));
@@ -518,6 +568,7 @@ impl State {
         if changed {
             self.request_render();
         }
+        self.restore_keyboard_focus();
     }
 
     fn pointer_motion(&mut self, (x, y): (f64, f64), modifiers: Modifiers) {
@@ -546,6 +597,7 @@ impl State {
         if self.draw.picker_active() {
             if self.draw.picker_release(point, latch_picker) {
                 self.request_render();
+                self.restore_keyboard_focus();
             }
             return;
         }
@@ -580,6 +632,7 @@ impl State {
             .draw
             .text_click_at(Point::new(x as f32, y as f32), clicks);
         if changed {
+            self.focus_keyboard_on_input();
             self.request_render();
         }
         changed
@@ -699,6 +752,7 @@ struct WaylandState {
     outputs: BTreeMap<OutputId, Output>,
     pointer: Option<WlPointer>,
     keyboard: Option<WlKeyboard>,
+    text_input: Option<ZwpTextInputV3>,
 
     cursor_shape_manager: Option<WpCursorShapeManagerV1>,
     tablet_manager: Option<ZwpTabletManagerV2>,
@@ -717,6 +771,7 @@ struct Output {
 
 delegate_noop!(WlCompositor);
 delegate_noop!(WlRegion);
+delegate_noop!(ZwpTextInputManagerV3);
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
     fn event(

@@ -1,10 +1,14 @@
 use std::num::NonZeroUsize;
+use std::ops::Range;
 
-use parley::{Layout, PlainEditor, PlainEditorDriver, SplitString, StyleProperty};
+use parley::{
+    Affinity, Cursor, Layout, PlainEditor, PlainEditorDriver, Selection, SplitString, StyleProperty,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::scene::{Bounds, ElementId, Point, Style, text_bounds};
 use crate::render::{TextSpec, text_styles, with_text_context};
+pub(crate) use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::PreeditHint;
 
 pub(crate) enum CursorMove {
     Left,
@@ -19,11 +23,45 @@ pub(crate) enum CursorMove {
     TextEnd,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreeditSpan {
+    pub(crate) range: Range<usize>,
+    pub(crate) style: PreeditHint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Preedit {
+    pub(crate) text: String,
+    pub(crate) cursor: Option<(usize, usize)>,
+    pub(crate) spans: Vec<PreeditSpan>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TextInputBatch {
+    pub(crate) preedit: Option<Preedit>,
+    pub(crate) commit: Option<String>,
+    pub(crate) delete_surrounding: Option<(usize, usize)>,
+    pub(crate) submit: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TextInputSnapshot<'a> {
+    pub(crate) session: u64,
+    pub(crate) content: SplitString<'a>,
+    pub(crate) cursor: usize,
+    pub(crate) anchor: usize,
+    pub(crate) external_revision: u64,
+    pub(crate) cursor_rectangle: Option<[i32; 4]>,
+}
+
 #[derive(Debug)]
 pub(super) struct TextEdit {
+    pub(super) session: u64,
     pub(super) id: Option<ElementId>,
     pub(super) origin: Point,
     editor: Box<PlainEditor<()>>,
+    external_revision: u64,
+    preedit_hints: Vec<PreeditSpan>,
     drag_point: Option<Point>,
     pub(super) style: Style,
     pub(super) scale: [f32; 2],
@@ -31,6 +69,7 @@ pub(super) struct TextEdit {
 
 impl TextEdit {
     pub(super) fn new(
+        session: u64,
         id: Option<ElementId>,
         origin: Point,
         content: String,
@@ -45,9 +84,12 @@ impl TextEdit {
         editor.set_text(&content);
         with_text_context(|fonts, layouts| editor.driver(fonts, layouts).move_to_text_end());
         Self {
+            session,
             id,
             origin,
             editor: Box::new(editor),
+            external_revision: 0,
+            preedit_hints: Vec::new(),
             drag_point: None,
             style,
             scale,
@@ -126,11 +168,17 @@ impl TextEdit {
 
     fn external_edit(&mut self, edit: impl FnOnce(&mut PlainEditorDriver<'_, ()>)) -> bool {
         let generation = self.editor.generation();
+        self.preedit_hints.clear();
         with_text_context(|fonts, layouts| {
             let mut driver = self.editor.driver(fonts, layouts);
+            driver.clear_compose();
             edit(&mut driver);
         });
-        self.editor.generation() != generation
+        let changed = self.editor.generation() != generation;
+        if changed {
+            self.external_revision = self.external_revision.wrapping_add(1);
+        }
+        changed
     }
 
     pub(super) fn insert(&mut self, text: &str) -> bool {
@@ -205,6 +253,49 @@ impl TextEdit {
         self.external_edit(|driver| driver.select_all())
     }
 
+    pub(super) fn clear_preedit(&mut self) -> bool {
+        let changed = self.editor.is_composing();
+        self.preedit_hints.clear();
+        with_text_context(|fonts, layouts| self.editor.driver(fonts, layouts).clear_compose());
+        changed
+    }
+
+    pub(super) fn apply_text_input(&mut self, batch: TextInputBatch) -> bool {
+        let generation = self.editor.generation();
+        let preedit = batch.preedit.filter(|preedit| !preedit.text.is_empty());
+        self.preedit_hints.clear();
+        with_text_context(|fonts, layouts| {
+            let mut driver = self.editor.driver(fonts, layouts);
+            // Pure preedit updates replace the composition in place, shaping only once.
+            if preedit.is_none() || batch.commit.is_some() || batch.delete_surrounding.is_some() {
+                driver.clear_compose();
+            }
+            if let Some((before, after)) = batch.delete_surrounding {
+                let selection = driver.editor.raw_selection().text_range();
+                let text = driver.editor.raw_text();
+                if before <= selection.start
+                    && text.is_char_boundary(selection.start - before)
+                    && text.is_char_boundary(selection.end.saturating_add(after))
+                {
+                    if let Some(len) = NonZeroUsize::new(after) {
+                        driver.delete_bytes_after_selection(len);
+                    }
+                    if let Some(len) = NonZeroUsize::new(before) {
+                        driver.delete_bytes_before_selection(len);
+                    }
+                }
+            }
+            if let Some(commit) = batch.commit {
+                driver.insert_or_replace_selection(&commit);
+            }
+            if let Some(preedit) = preedit {
+                driver.set_compose(&preedit.text, preedit.cursor);
+                self.preedit_hints = preedit.spans;
+            }
+        });
+        self.editor.generation() != generation
+    }
+
     pub(super) fn shows_caret(&self) -> bool {
         self.editor.raw_selection().is_collapsed() && self.editor.cursor_geometry(1.0).is_some()
     }
@@ -217,16 +308,60 @@ impl TextEdit {
         [rect.x0 as f32, rect.y0 as f32]
     }
 
-    pub(super) fn selection_rectangles(&self, mut draw: impl FnMut([f32; 4])) {
-        self.editor
-            .raw_selection()
-            .geometry_with(self.layout(), |rect, _| {
-                draw([
-                    rect.x0 as f32,
-                    rect.y0 as f32,
-                    rect.width() as f32,
-                    rect.height() as f32,
-                ]);
+    pub(super) fn ime_area(&self) -> parley::BoundingBox {
+        self.editor.ime_cursor_area()
+    }
+
+    pub(super) fn decoration_rectangles(&self, mut draw: impl FnMut([f32; 4], PreeditHint)) {
+        let layout = self.layout();
+        let mut draw_selection = |selection: Selection, style| {
+            selection.geometry_with(layout, |rect, _| {
+                draw(
+                    [
+                        rect.x0 as f32,
+                        rect.y0 as f32,
+                        rect.width() as f32,
+                        rect.height() as f32,
+                    ],
+                    style,
+                );
             });
+        };
+        if let Some(range) = self.editor.raw_compose() {
+            for (range, style) in std::iter::once((range.clone(), PreeditHint::Whole)).chain(
+                self.preedit_hints.iter().map(|span| {
+                    (
+                        range.start + span.range.start..range.start + span.range.end,
+                        span.style,
+                    )
+                }),
+            ) {
+                draw_selection(
+                    Selection::new(
+                        Cursor::from_byte_index(layout, range.start, Affinity::Downstream),
+                        Cursor::from_byte_index(layout, range.end, Affinity::Upstream),
+                    ),
+                    style,
+                );
+            }
+        }
+        draw_selection(*self.editor.raw_selection(), PreeditHint::Selection);
+    }
+
+    pub(super) fn snapshot(&self, cursor_rectangle: Option<[i32; 4]>) -> TextInputSnapshot<'_> {
+        TextInputSnapshot {
+            session: self.session,
+            content: self.editor.text(),
+            cursor: self.editor.raw_compose().as_ref().map_or_else(
+                || self.editor.raw_selection().focus().index(),
+                |range| range.start,
+            ),
+            anchor: self.editor.raw_compose().as_ref().map_or_else(
+                || self.editor.raw_selection().anchor().index(),
+                |range| range.start,
+            ),
+            external_revision: self.external_revision,
+            cursor_rectangle,
+        }
     }
 }

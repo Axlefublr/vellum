@@ -348,6 +348,7 @@ impl WgpuState {
         viewport_origin: [f32; 2],
         text_specs: &[TextSpec<'_>],
         active_text: Option<(u64, &parley::Layout<()>)>,
+        before_present: impl FnOnce(),
     ) -> bool {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(output)
@@ -508,6 +509,7 @@ impl WgpuState {
             }
         }
         self.queue.submit(Some(encoder.finish()));
+        before_present();
         output.present();
         true
     }
