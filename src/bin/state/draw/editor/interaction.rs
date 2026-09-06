@@ -23,6 +23,19 @@ impl From<&Element> for ResizeSnapshot {
     }
 }
 
+impl ResizeSnapshot {
+    pub(super) fn set_style(&mut self, style: Style) {
+        if !matches!(self.kind, ElementKind::Text { .. })
+            || style.size != self.style.size
+            || style.filled != self.style.filled
+            || (style.filled && style.roundness != self.style.roundness)
+        {
+            self.bounds = bounds_for(&self.kind, style);
+        }
+        self.style = style;
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum Interaction {
     Freehand(freehand::LiveStroke),
@@ -43,6 +56,7 @@ pub(super) enum Interaction {
         start: Point,
         point: Point,
         original: ResizeSnapshot,
+        properties: Style,
         current: ResizeSnapshot,
         equal_side_anchor: Option<usize>,
     },
@@ -65,6 +79,7 @@ impl Editor {
                 start,
                 point,
                 original,
+                properties,
                 current,
                 equal_side_anchor,
                 ..
@@ -76,6 +91,7 @@ impl Editor {
                     modifiers,
                     equal_side_anchor,
                     text_size_range,
+                    *properties,
                 );
                 if resized == *current {
                     Damage::None
@@ -143,6 +159,7 @@ impl Editor {
                         start: point,
                         point,
                         current: original.clone(),
+                        properties: original.style,
                         original,
                         equal_side_anchor: None,
                     });
@@ -219,6 +236,7 @@ impl Editor {
                 handle,
                 start,
                 original,
+                properties,
                 mut equal_side_anchor,
                 ..
             }) => {
@@ -229,6 +247,7 @@ impl Editor {
                     modifiers,
                     &mut equal_side_anchor,
                     text_size_range,
+                    properties,
                 );
                 self.interaction = Some(Interaction::Resizing {
                     id,
@@ -236,6 +255,7 @@ impl Editor {
                     start,
                     point,
                     original,
+                    properties,
                     current,
                     equal_side_anchor,
                 });
@@ -308,6 +328,7 @@ impl Editor {
                 handle,
                 start,
                 original,
+                properties,
                 mut equal_side_anchor,
                 ..
             }) => {
@@ -318,6 +339,7 @@ impl Editor {
                     modifiers,
                     &mut equal_side_anchor,
                     text_size_range,
+                    properties,
                 );
                 if current != original
                     && let Some(element) = self.element_mut(id)
@@ -442,6 +464,7 @@ fn resize_element(
     modifiers: Modifiers,
     equal_side_anchor: &mut Option<usize>,
     text_size_range: [f32; 2],
+    properties: Style,
 ) -> ResizeSnapshot {
     if matches!(original.kind, ElementKind::Text { .. }) {
         let (kind, style, bounds) = selection::resize_text(
@@ -453,11 +476,15 @@ fn resize_element(
             modifiers,
             text_size_range,
         );
-        return ResizeSnapshot {
+        let mut resized = ResizeSnapshot {
             kind,
             style,
             bounds,
         };
+        let size = (style.size + (properties.size - original.style.size))
+            .clamp(text_size_range[0], text_size_range[1]);
+        resized.set_style(Style { size, ..properties });
+        return resized;
     }
     let kind = selection::resize(
         &original.kind,
@@ -468,8 +495,8 @@ fn resize_element(
         equal_side_anchor,
     );
     ResizeSnapshot {
-        bounds: bounds_for(&kind, original.style),
+        bounds: bounds_for(&kind, properties),
         kind,
-        style: original.style,
+        style: properties,
     }
 }

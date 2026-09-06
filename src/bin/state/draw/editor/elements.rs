@@ -8,26 +8,6 @@ impl Editor {
         &self.elements
     }
 
-    pub fn update_text_bounds(
-        &mut self,
-        mut layout_size: impl FnMut(ElementId, &str, f32) -> [f32; 2],
-    ) {
-        let previewed = match &self.interaction {
-            Some(Interaction::Resizing { id, .. }) => Some(*id),
-            Some(Interaction::EditingText(edit)) => edit.id,
-            _ => None,
-        };
-        for element in &mut self.elements {
-            if Some(element.id) == previewed {
-                continue;
-            }
-            if let ElementKind::Text { content, .. } = &element.kind {
-                let size = layout_size(element.id, content, element.style.size);
-                element.update_text_bounds(size);
-            }
-        }
-    }
-
     pub fn text_click_at(&mut self, point: Point, clicks: u8) -> Damage {
         if let Some(edit) = self.text_edit_mut() {
             return if edit.bounds().contains(point) {

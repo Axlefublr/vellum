@@ -337,18 +337,6 @@ impl Editor {
                 &drawing_kind(*tool, *start, *current, *modifiers),
                 self.style,
             )),
-            Some(Interaction::Moving {
-                ids,
-                start,
-                current,
-            }) => output.extend(ids.iter().filter_map(|id| {
-                let delta = *current - *start;
-                self.element(*id)
-                    .map(|element| element.geometry.translated([delta.x, delta.y]))
-            })),
-            Some(Interaction::Resizing { current, .. }) => {
-                output.push(geometry(&current.kind, current.style));
-            }
             _ => {}
         }
     }
@@ -420,11 +408,13 @@ impl Editor {
                 current,
                 ..
             }) if *resizing_id == id => {
-                if matches!(current.kind, ElementKind::Text { .. }) {
+                if !matches!(
+                    current.kind,
+                    ElementKind::Path { smooth: false, .. } | ElementKind::Triangle { .. }
+                ) {
                     output.push(selection::outline(current.bounds.min, current.bounds.max));
-                    return;
                 }
-                Some(current.kind.clone())
+                return;
             }
             _ => None,
         };
@@ -480,11 +470,17 @@ impl Editor {
         TextEdit::new(session, id, origin, content, style, scale)
     }
 
-    pub fn element_is_previewed(&self, id: ElementId) -> bool {
+    pub fn element_geometry_preview(&self, element: &Element) -> Option<Geometry> {
+        if let Some(delta) = self.moving_offset(element.id) {
+            return Some(element.geometry.translated([delta.x, delta.y]));
+        }
         match &self.interaction {
-            Some(Interaction::Moving { ids, .. }) => ids.contains(&id),
-            Some(Interaction::Resizing { id: resized, .. }) => *resized == id,
-            _ => false,
+            Some(Interaction::Resizing {
+                id: resized,
+                current,
+                ..
+            }) if *resized == element.id => Some(geometry(&current.kind, current.style)),
+            _ => None,
         }
     }
 

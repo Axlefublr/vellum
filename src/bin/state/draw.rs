@@ -9,7 +9,7 @@ mod tool;
 mod triangle;
 
 use crate::render::{
-    FillRule, Geometry, LocalGeometry, TextSpec, Viewport, WgpuState, text_line_height,
+    FillRule, Geometry, LocalGeometry, SceneItem, TextSpec, Viewport, WgpuState, text_line_height,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -369,25 +369,12 @@ impl DrawState {
         if !damage.changed() {
             return;
         }
-        if damage == Damage::Scene {
-            wgpu.set_committed_geometry(
-                self.editor
-                    .elements()
-                    .iter()
-                    .filter(|element| !self.editor.element_is_previewed(element.id))
-                    .map(|element| &element.geometry),
-            );
-        }
-
-        self.editor
-            .update_text_bounds(|id, content, size| wgpu.text_layout_size(id, content, size));
-
         let active_text = self.editor.active_text();
-        let editing_id = active_text.and_then(|edit| edit.id);
-        let text_specs = {
-            let mut text_specs = Vec::new();
+        let items = {
+            let mut items = Vec::new();
             for element in self.editor.elements() {
-                if Some(element.id) == editing_id {
+                if let Some(edit) = active_text.filter(|edit| edit.id == Some(element.id)) {
+                    items.push(SceneItem::Text(edit.spec()));
                     continue;
                 }
                 let (kind, style) = self
@@ -400,10 +387,16 @@ impl DrawState {
                     scale,
                 } = kind
                 else {
+                    items.push(SceneItem::Geometry(
+                        self.editor
+                            .element_geometry_preview(element)
+                            .map(std::borrow::Cow::Owned)
+                            .unwrap_or(std::borrow::Cow::Borrowed(&element.geometry)),
+                    ));
                     continue;
                 };
                 let offset = self.editor.moving_offset(element.id).unwrap_or_default();
-                text_specs.push(TextSpec {
+                items.push(SceneItem::Text(TextSpec {
                     key: element.id,
                     content,
                     left: origin.x + offset.x,
@@ -412,17 +405,17 @@ impl DrawState {
                     color: style.color,
                     background_roundness: style.filled.then_some(style.roundness),
                     scale: *scale,
-                });
+                }));
             }
-            if let Some(edit) = active_text {
-                text_specs.push(edit.spec());
+            if let Some(edit) = active_text.filter(|edit| edit.id.is_none()) {
+                items.push(SceneItem::Text(edit.spec()));
             }
             if let Some((content, at)) = &self.feedback {
                 for (index, [x, y]) in [[15.0, 16.0], [17.0, 16.0], [16.0, 15.0], [16.0, 17.0]]
                     .into_iter()
                     .enumerate()
                 {
-                    text_specs.push(TextSpec {
+                    items.push(SceneItem::Text(TextSpec {
                         key: u64::MAX - 34 + index as u64,
                         content,
                         left: at.x + x,
@@ -431,9 +424,9 @@ impl DrawState {
                         color: [0.0, 0.0, 0.0, 0.9],
                         background_roundness: None,
                         scale: [1.0; 2],
-                    });
+                    }));
                 }
-                text_specs.push(TextSpec {
+                items.push(SceneItem::Text(TextSpec {
                     key: u64::MAX - 30,
                     content,
                     left: at.x + 16.0,
@@ -442,9 +435,9 @@ impl DrawState {
                     color: [1.0, 1.0, 1.0, 1.0],
                     background_roundness: None,
                     scale: [1.0; 2],
-                });
+                }));
             }
-            text_specs
+            items
         };
 
         self.previews.clear();
@@ -483,13 +476,13 @@ impl DrawState {
         }
         self.picker = self.editor.picker_geometry();
         if wgpu.render(
+            &items,
             &self.previews,
             self.picker.as_ref(),
             Viewport {
                 origin: [origin.x, origin.y],
                 scale,
             },
-            &text_specs,
             self.editor
                 .active_text()
                 .map(|edit| (edit.id.unwrap_or(0), edit.layout())),

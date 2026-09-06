@@ -2,10 +2,11 @@ mod geometry;
 mod text;
 
 pub use geometry::{DrawCommand, FillRule, Geometry, LocalGeometry, StrokeStyle};
-pub(crate) use text::{TextFont, init_text_font, text_styles, with_text_context};
+pub(crate) use text::{TextFont, init_text_font, layout_text, text_styles, with_text_context};
 pub use text::{TextSpec, text_bounds, text_line_height, text_padding};
 
 use kurbo::Affine;
+use std::borrow::Cow;
 use text::TextState;
 use wayland_client::Proxy;
 use wayland_client::protocol::wl_display::WlDisplay;
@@ -17,6 +18,11 @@ const PICKER_RENDER_SCALE: u32 = 2;
 pub struct Viewport {
     pub origin: [f32; 2],
     pub scale: [f64; 2],
+}
+
+pub enum SceneItem<'a> {
+    Geometry(Cow<'a, Geometry>),
+    Text(TextSpec<'a>),
 }
 
 struct PickerTarget {
@@ -102,7 +108,6 @@ pub struct WgpuState {
     main_scene: vello_hybrid::Scene,
     picker_scene: vello_hybrid::Scene,
     texture_bindings: vello_hybrid::TextureBindings,
-    committed: Geometry,
     picker_composite_pipeline: wgpu::RenderPipeline,
     picker_composite_layout: wgpu::BindGroupLayout,
     picker_target: Option<PickerTarget>,
@@ -278,23 +283,10 @@ impl WgpuState {
             main_scene: vello_hybrid::Scene::new(1, 1),
             picker_scene: vello_hybrid::Scene::new(1, 1),
             texture_bindings: vello_hybrid::TextureBindings::new(),
-            committed: Geometry::empty(),
             picker_composite_pipeline,
             picker_composite_layout,
             picker_target: None,
             text: TextState::default(),
-        }
-    }
-
-    pub fn set_committed_geometry<'a>(
-        &mut self,
-        geometries: impl IntoIterator<Item = &'a Geometry>,
-    ) {
-        self.committed.commands.clear();
-        for geometry in geometries {
-            self.committed
-                .commands
-                .extend(geometry.commands.iter().cloned());
         }
     }
 
@@ -308,10 +300,6 @@ impl WgpuState {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
-    }
-
-    pub fn text_layout_size(&mut self, key: u64, content: &str, font_size: f32) -> [f32; 2] {
-        self.text.layout_size(key, content, font_size)
     }
 
     fn composite_picker(
@@ -348,10 +336,10 @@ impl WgpuState {
 
     pub fn render(
         &mut self,
+        items: &[SceneItem<'_>],
         previews: &[Geometry],
         picker: Option<&LocalGeometry>,
         viewport: Viewport,
-        text_specs: &[TextSpec<'_>],
         active_text: Option<(u64, &parley::Layout<()>)>,
         before_present: impl FnOnce(),
     ) -> bool {
@@ -397,23 +385,27 @@ impl WgpuState {
                 )),
         );
         let target_is_srgb = self.surface_config.format.is_srgb();
-        replay_geometry(&mut self.main_scene, &self.committed, target_is_srgb);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        self.text.append_to_scene(
-            &mut text::TextTarget {
-                scene: &mut self.main_scene,
-                resources: &mut self.main_resources,
-                renderer: &mut self.main_renderer,
-                device: &self.device,
-                queue: &self.queue,
-                encoder: &mut encoder,
-                is_srgb: target_is_srgb,
-            },
-            text_specs,
-            active_text,
-        );
+        let mut target = text::TextTarget {
+            scene: &mut self.main_scene,
+            resources: &mut self.main_resources,
+            renderer: &mut self.main_renderer,
+            device: &self.device,
+            queue: &self.queue,
+            encoder: &mut encoder,
+            is_srgb: target_is_srgb,
+        };
+        for item in items {
+            match item {
+                SceneItem::Geometry(geometry) => {
+                    replay_geometry(target.scene, geometry, target_is_srgb)
+                }
+                SceneItem::Text(spec) => self.text.append_to_scene(&mut target, spec, active_text),
+            }
+        }
+        self.text.finish_frame(&mut target);
         for geometry in previews {
             replay_geometry(&mut self.main_scene, geometry, target_is_srgb);
         }

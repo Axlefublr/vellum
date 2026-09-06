@@ -137,12 +137,15 @@ impl Editor {
             return (Damage::Preview, background_label(edit.style.filled));
         }
         if !self.selected.is_empty() {
-            let enable = self
-                .selected
-                .iter()
-                .filter_map(|id| self.element(*id))
-                .filter(|element| supports_fill(&element.kind))
-                .any(|element| !element.style.filled);
+            let enable = if let Some(Interaction::Resizing { current, .. }) = &self.interaction {
+                !current.style.filled
+            } else {
+                self.selected
+                    .iter()
+                    .filter_map(|id| self.element(*id))
+                    .filter(|element| supports_fill(&element.kind))
+                    .any(|element| !element.style.filled)
+            };
             return self.adjust_selected(|kind, style| {
                 supports_fill(kind).then(|| {
                     style.filled = enable;
@@ -256,7 +259,7 @@ impl Editor {
             );
         }
         if self.selected.is_empty() {
-            if self.tool == Tool::Eraser {
+            if matches!(self.tool, Tool::Eraser | Tool::Select) {
                 return (Damage::None, String::new());
             }
             let tool = self.tool;
@@ -321,8 +324,28 @@ impl Editor {
 
     fn adjust_selected(
         &mut self,
-        mut adjust: impl FnMut(&mut ElementKind, &mut Style) -> Option<String>,
+        mut adjust: impl FnMut(&ElementKind, &mut Style) -> Option<String>,
     ) -> (Damage, String) {
+        if let Some(Interaction::Resizing {
+            properties,
+            current,
+            ..
+        }) = &mut self.interaction
+        {
+            let mut style = current.style;
+            let Some(feedback) = adjust(&current.kind, &mut style) else {
+                return (Damage::None, String::new());
+            };
+            if style != current.style {
+                // Text resizing also changes font size; retain only the user's adjustment.
+                *properties = Style {
+                    size: properties.size + (style.size - current.style.size),
+                    ..style
+                };
+                current.set_style(style);
+            }
+            return (Damage::Preview, feedback);
+        }
         let ids = self.selected.clone();
         let mut updates = Vec::with_capacity(ids.len());
         let mut feedback = String::new();
@@ -330,14 +353,13 @@ impl Editor {
             let Some(element) = self.element_mut(id) else {
                 continue;
             };
-            let mut kind = element.kind.clone();
             let mut style = element.style;
-            let Some(label) = adjust(&mut kind, &mut style) else {
+            let Some(label) = adjust(&element.kind, &mut style) else {
                 continue;
             };
             feedback = label;
-            if kind != element.kind || style != element.style {
-                let (kind, style) = element.replace(kind, style);
+            if style != element.style {
+                let (kind, style) = element.replace(element.kind.clone(), style);
                 updates.push((id, kind, style));
             }
         }
@@ -378,27 +400,11 @@ impl Editor {
         if self.selected.is_empty() {
             return Damage::Preview;
         }
-        let ids = self.selected.clone();
-        let mut elements = Vec::with_capacity(ids.len());
-        for id in ids {
-            let Some(element) = self.element_mut(id) else {
-                continue;
-            };
-            let mut style = element.style;
-            let previous = style.color;
+        let (damage, _) = self.adjust_selected(|_, style| {
             apply(&mut style.color);
-            if style.color == previous {
-                continue;
-            }
-            let kind = element.kind.clone();
-            let (kind, style) = element.replace(kind, style);
-            elements.push((id, kind, style));
-        }
-        if elements.is_empty() {
-            return Damage::Preview;
-        }
-        self.history.record(HistoryEntry::Update(elements));
-        Damage::Scene
+            Some(String::new())
+        });
+        damage.max(Damage::Preview)
     }
 
     pub(super) fn properties(&self, tool: Tool) -> Option<&ToolProperties> {

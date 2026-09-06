@@ -1,5 +1,5 @@
 use super::{CIRCLE_KAPPA, freehand};
-use crate::render::{FillRule, Geometry, StrokeStyle, text_line_height};
+use crate::render::{FillRule, Geometry, StrokeStyle, layout_text};
 use std::borrow::Cow;
 
 pub(super) const HIT_SLOP: f32 = 5.0;
@@ -258,13 +258,6 @@ impl Element {
         (kind, style)
     }
 
-    pub(super) fn update_text_bounds(&mut self, [width, height]: [f32; 2]) {
-        let ElementKind::Text { origin, scale, .. } = self.kind else {
-            return;
-        };
-        self.bounds = text_bounds(origin, [width, height], self.style, scale);
-    }
-
     pub(super) fn preview_bounds(&self, kind: &ElementKind) -> Bounds {
         match (&self.kind, kind) {
             (
@@ -336,17 +329,12 @@ impl Element {
                 )
             }
             ElementKind::Ellipse { center, radii } => {
-                if radii.x <= f32::EPSILON || radii.y <= f32::EPSILON {
-                    return point.distance_squared(*center) <= tolerance.powi(2);
-                }
                 let local = point - *center;
-                let normalized = ((local.x / radii.x).powi(2) + (local.y / radii.y).powi(2)).sqrt();
-                let normalized_tolerance = tolerance / radii.x.min(radii.y).max(1.0);
-                if self.style.filled {
-                    normalized <= 1.0 + normalized_tolerance
-                } else {
-                    (normalized - 1.0).abs() <= normalized_tolerance
-                }
+                (self.style.filled
+                    && radii.x > 0.0
+                    && radii.y > 0.0
+                    && (local.x / radii.x).powi(2) + (local.y / radii.y).powi(2) <= 1.0)
+                    || ellipse_distance(local, *radii) <= tolerance
             }
             ElementKind::Text { .. } => {
                 if expand_text {
@@ -357,6 +345,47 @@ impl Element {
             }
         }
     }
+}
+
+fn ellipse_distance(point: Point, radii: Point) -> f32 {
+    let (x, y, a, b) = if radii.x >= radii.y {
+        (point.x.abs(), point.y.abs(), radii.x, radii.y)
+    } else {
+        (point.y.abs(), point.x.abs(), radii.y, radii.x)
+    };
+    if b <= f32::EPSILON {
+        return (x - a).max(0.0).hypot(y);
+    }
+    let (x, y, a, b) = (f64::from(x), f64::from(y), f64::from(a), f64::from(b));
+    let (a2, b2) = (a * a, b * b);
+    let (nearest_x, nearest_y) = if y == 0.0 {
+        let difference = a2 - b2;
+        if a * x < difference {
+            let nearest_x = a2 * x / difference;
+            (nearest_x, b * (1.0 - (nearest_x / a).powi(2)).sqrt())
+        } else {
+            (a, 0.0)
+        }
+    } else if x == 0.0 {
+        (0.0, b)
+    } else {
+        // The nearest point satisfies the ellipse equation with one scalar multiplier.
+        // Its residual decreases monotonically above -b², so bisection stays bounded.
+        let mut low = b * (y - b);
+        let mut high = (a * x + b * y).max(0.0);
+        for _ in 0..64 {
+            let t = (low + high) * 0.5;
+            let residual = (a * x / (t + a2)).powi(2) + (b * y / (t + b2)).powi(2);
+            if residual > 1.0 {
+                low = t;
+            } else {
+                high = t;
+            }
+        }
+        let t = (low + high) * 0.5;
+        (a2 * x / (t + a2), b2 * y / (t + b2))
+    };
+    (x - nearest_x).hypot(y - nearest_y) as f32
 }
 
 pub(super) fn bounds_for(kind: &ElementKind, style: Style) -> Bounds {
@@ -406,15 +435,15 @@ pub(super) fn bounds_for(kind: &ElementKind, style: Style) -> Bounds {
             origin,
             content,
             scale,
-        } => text_bounds(
-            *origin,
-            [
-                content.chars().count().max(1) as f32 * style.size * 0.65,
-                text_line_height(style.size),
-            ],
-            style,
-            *scale,
-        ),
+        } => {
+            let layout = layout_text(content, style.size);
+            text_bounds(
+                *origin,
+                [layout.full_width(), layout.height()],
+                style,
+                *scale,
+            )
+        }
     };
     let radius = width * 0.5;
     let expansion = match kind {

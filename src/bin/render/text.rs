@@ -148,6 +148,7 @@ impl TextSpec<'_> {
     ) {
         let scene = &mut *target.scene;
         let target_is_srgb = target.is_srgb;
+        scene.set_fill_rule(peniko::Fill::NonZero);
         let automatic_background = self
             .background_roundness
             .map(|roundness| (background_color(self.color), roundness));
@@ -345,6 +346,20 @@ struct CachedText {
     used: bool,
 }
 
+pub(crate) fn layout_text(content: &str, font_size: f32) -> Layout<()> {
+    with_text_context(|fonts, layouts| {
+        let mut builder = layouts.ranged_builder(fonts, content, 1.0, false);
+        for style in text_styles() {
+            builder.push_default(style);
+        }
+        builder.push_default(StyleProperty::FontSize(font_size));
+        let mut layout = builder.build(content);
+        layout.break_all_lines(None);
+        layout.align(Alignment::Start, Default::default());
+        layout
+    })
+}
+
 fn cached_layout<'a>(
     buffers: &'a mut HashMap<u64, CachedText>,
     key: u64,
@@ -355,17 +370,7 @@ fn cached_layout<'a>(
     if cached.content != content || cached.font_size != font_size {
         content.clone_into(&mut cached.content);
         cached.font_size = font_size;
-        cached.layout = with_text_context(|fonts, layouts| {
-            let mut builder = layouts.ranged_builder(fonts, content, 1.0, false);
-            for style in text_styles() {
-                builder.push_default(style);
-            }
-            builder.push_default(StyleProperty::FontSize(font_size));
-            let mut layout = builder.build(content);
-            layout.break_all_lines(None);
-            layout.align(Alignment::Start, Default::default());
-            layout
-        });
+        cached.layout = layout_text(content, font_size);
     }
     cached.used = true;
     &cached.layout
@@ -382,16 +387,17 @@ impl TextState {
     pub(super) fn append_to_scene(
         &mut self,
         target: &mut TextTarget<'_>,
-        specs: &[TextSpec<'_>],
+        spec: &TextSpec<'_>,
         active_text: Option<(u64, &Layout<()>)>,
     ) {
-        for spec in specs {
-            let layout = match active_text {
-                Some((key, layout)) if key == spec.key => layout,
-                _ => cached_layout(&mut self.buffers, spec.key, spec.content, spec.font_size),
-            };
-            spec.append_to_scene(layout, target, &mut self.bitmaps, &mut self.outline_glyphs);
-        }
+        let layout = match active_text {
+            Some((key, layout)) if key == spec.key => layout,
+            _ => cached_layout(&mut self.buffers, spec.key, spec.content, spec.font_size),
+        };
+        spec.append_to_scene(layout, target, &mut self.bitmaps, &mut self.outline_glyphs);
+    }
+
+    pub(super) fn finish_frame(&mut self, target: &mut TextTarget<'_>) {
         self.buffers
             .retain(|_, cached| std::mem::take(&mut cached.used));
         self.bitmaps.retain(|_, image| {
@@ -404,10 +410,5 @@ impl TextState {
                 false
             }
         });
-    }
-
-    pub(super) fn layout_size(&mut self, key: u64, content: &str, font_size: f32) -> [f32; 2] {
-        let layout = cached_layout(&mut self.buffers, key, content, font_size);
-        [layout.full_width(), layout.height()]
     }
 }
