@@ -32,6 +32,9 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::Z
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_manager_v2::ZwpTabletManagerV2;
+use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2;
+use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2;
+use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_v2::ZwpTabletPadV2;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_seat_v2::ZwpTabletSeatV2;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_tool_v2::ZwpTabletToolV2;
@@ -71,6 +74,7 @@ macro_rules! delegate_noop {
 struct PendingPenMotion {
     anchor: Option<Point>,
     samples: Vec<Point>,
+    modifiers: Modifiers,
 }
 
 impl PendingPenMotion {
@@ -461,6 +465,7 @@ impl State {
     }
 
     pub fn deactivate(&mut self) {
+        self.flush_pen_motion();
         self.keyboard.cancel_repeat();
         self.pointer.cancel_gesture();
         self.tablet.cancel_gesture();
@@ -499,6 +504,7 @@ impl State {
     }
 
     fn apply_action(&mut self, action: Action) {
+        self.flush_pen_motion();
         let clear_on_escape = self.clear_on_escape && matches!(action, Action::Cancel);
         let anchor = self
             .pointer
@@ -535,6 +541,7 @@ impl State {
     }
 
     fn modifiers_changed(&mut self) {
+        self.flush_pen_motion();
         let modifiers = self.modifiers();
         if self.draw.modifiers_changed(modifiers) {
             self.request_render();
@@ -582,6 +589,10 @@ impl State {
         // Preserve one real bend inside each display frame without letting a
         // high-polling-rate device grow the stroke without bound.
         if self.draw.is_drawing_pen() {
+            if self.pending_pen_motion.modifiers != modifiers {
+                self.flush_pen_motion();
+            }
+            self.pending_pen_motion.modifiers = modifiers;
             self.pending_pen_motion.push(point);
             self.request_render();
             return;
@@ -679,7 +690,15 @@ impl State {
     }
 
     fn request_render(&mut self) {
-        self.flush_pen_motion();
+        // Only the input output advances a stroke. An idle secondary output
+        // must not defeat batching while the input output awaits its frame.
+        if self
+            .input_output
+            .and_then(|id| self.wayland.outputs.get(&id))
+            .is_some_and(|output| !output.frame_pending && output.wgpu.is_some())
+        {
+            self.flush_pen_motion();
+        }
         let outputs: Vec<_> = self.draw.damaged_outputs().collect();
         for output in outputs {
             self.request_output_render(output);
@@ -708,7 +727,7 @@ impl State {
     fn flush_pen_motion(&mut self) {
         let (points, count) = self.pending_pen_motion.take();
         if count > 0 {
-            let modifiers = self.modifiers();
+            let modifiers = self.pending_pen_motion.modifiers;
             self.draw.pen_motion(&points[..count], modifiers);
         }
     }
@@ -968,6 +987,9 @@ delegate_noop!(WpCursorShapeDeviceV1);
 
 delegate_noop!(ZwpTabletManagerV2);
 delegate_dispatch!(State: [ZwpTabletSeatV2: ()] => input::TabletState);
-delegate_noop!(ZwpTabletV2);
+delegate_dispatch!(State: [ZwpTabletV2: ()] => input::TabletState);
 delegate_dispatch!(State: [ZwpTabletToolV2: ()] => input::TabletState);
-delegate_noop!(ZwpTabletPadV2);
+delegate_dispatch!(State: [ZwpTabletPadV2: ()] => input::TabletState);
+delegate_dispatch!(State: [ZwpTabletPadGroupV2: ()] => input::TabletState);
+delegate_noop!(ZwpTabletPadRingV2);
+delegate_noop!(ZwpTabletPadStripV2);

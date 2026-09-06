@@ -11,11 +11,18 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
     Shape, WpCursorShapeDeviceV1,
 };
 
+use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2;
+use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2;
+use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_v2::ZwpTabletPadV2;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_seat_v2::ZwpTabletSeatV2;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_tool_v2::ZwpTabletToolV2;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_v2::ZwpTabletV2;
 
+use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_group_v2::{
+    EVT_RING_OPCODE, EVT_STRIP_OPCODE,
+};
+use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_v2::EVT_GROUP_OPCODE;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_seat_v2::EVT_PAD_ADDED_OPCODE;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_seat_v2::EVT_TABLET_ADDED_OPCODE;
 use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_seat_v2::EVT_TOOL_ADDED_OPCODE;
@@ -31,10 +38,18 @@ const PEN: u8 = 1;
 const BUTTON: u8 = 2;
 
 #[derive(Default)]
+struct PadGroup {
+    rings: Vec<ZwpTabletPadRingV2>,
+    strips: Vec<ZwpTabletPadStripV2>,
+}
+
+#[derive(Default)]
 pub(in crate::state) struct TabletState {
     event_sequence: EventSequence,
 
     _tablet_seat: Option<ZwpTabletSeatV2>,
+    pad_groups: HashMap<ObjectId, Vec<ZwpTabletPadGroupV2>>,
+    group_controls: HashMap<ObjectId, PadGroup>,
     tablet_cursor_shape_devices: HashMap<ObjectId, WpCursorShapeDeviceV1>,
     cursor_serials: HashMap<ObjectId, u32>,
     current_cursors: HashMap<ObjectId, Cursor>,
@@ -141,6 +156,107 @@ impl Dispatch<ZwpTabletSeatV2, (), State> for TabletState {
     ]);
 }
 
+impl Dispatch<ZwpTabletV2, (), State> for TabletState {
+    fn event(
+        _state: &mut State,
+        tablet: &ZwpTabletV2,
+        event: <ZwpTabletV2 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<State>,
+    ) {
+        if let wayland_protocols::wp::tablet::zv2::client::zwp_tablet_v2::Event::Removed = event {
+            tablet.destroy();
+        }
+    }
+}
+
+impl Dispatch<ZwpTabletPadV2, (), State> for TabletState {
+    fn event(
+        state: &mut State,
+        pad: &ZwpTabletPadV2,
+        event: <ZwpTabletPadV2 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<State>,
+    ) {
+        use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_v2::Event;
+        match event {
+            Event::Group { pad_group } => {
+                state
+                    .tablet
+                    .pad_groups
+                    .entry(pad.id())
+                    .or_default()
+                    .push(pad_group);
+            }
+            Event::Removed => {
+                for group in state
+                    .tablet
+                    .pad_groups
+                    .remove(&pad.id())
+                    .unwrap_or_default()
+                {
+                    if let Some(controls) = state.tablet.group_controls.remove(&group.id()) {
+                        for ring in controls.rings {
+                            ring.destroy();
+                        }
+                        for strip in controls.strips {
+                            strip.destroy();
+                        }
+                    }
+                    group.destroy();
+                }
+                pad.destroy();
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(State, ZwpTabletPadV2, [
+        EVT_GROUP_OPCODE => (ZwpTabletPadGroupV2, ()),
+    ]);
+}
+
+impl Dispatch<ZwpTabletPadGroupV2, (), State> for TabletState {
+    fn event(
+        state: &mut State,
+        group: &ZwpTabletPadGroupV2,
+        event: <ZwpTabletPadGroupV2 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<State>,
+    ) {
+        use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_pad_group_v2::Event;
+        match event {
+            Event::Ring { ring } => {
+                state
+                    .tablet
+                    .group_controls
+                    .entry(group.id())
+                    .or_default()
+                    .rings
+                    .push(ring);
+            }
+            Event::Strip { strip } => {
+                state
+                    .tablet
+                    .group_controls
+                    .entry(group.id())
+                    .or_default()
+                    .strips
+                    .push(strip);
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(State, ZwpTabletPadGroupV2, [
+        EVT_RING_OPCODE => (ZwpTabletPadRingV2, ()),
+        EVT_STRIP_OPCODE => (ZwpTabletPadStripV2, ()),
+    ]);
+}
+
 impl Dispatch<ZwpTabletToolV2, (), State> for TabletState {
     fn event(
         state: &mut State,
@@ -159,13 +275,17 @@ impl Dispatch<ZwpTabletToolV2, (), State> for TabletState {
         }
         match &event {
             Event::Removed => {
-                state
+                if let Some(device) = state
                     .tablet
                     .tablet_cursor_shape_devices
-                    .remove(&tablet_tool.id());
+                    .remove(&tablet_tool.id())
+                {
+                    device.destroy();
+                }
                 state.tablet.cursor_serials.remove(&tablet_tool.id());
                 state.tablet.current_cursors.remove(&tablet_tool.id());
                 state.tablet.eraser_tools.remove(&tablet_tool.id());
+                tablet_tool.destroy();
                 state.refresh_pointer_cursor();
                 return;
             }
