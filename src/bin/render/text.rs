@@ -101,7 +101,11 @@ pub(super) struct TextState {
 impl TextState {
     pub(super) fn new() -> Self {
         Self {
-            font_system: FontSystem::new(),
+            font_system: {
+                let mut font_system = FontSystem::new();
+                font_system.db_mut().set_sans_serif_family("Inter");
+                font_system
+            },
             font_cache: HashMap::new(),
             buffers: HashMap::new(),
             prepared_text: Vec::new(),
