@@ -56,12 +56,14 @@ font_family = "sans-serif"
 font_weight = 400
 font_style = "normal"
 size = 16.0
-size_range.min = 8.0
-size_range.max = 500.0
-size_range.step = 0.5
 opacity = 1.0
 roundness = 0.1
 background = false
+size_range = {
+  min = 8.0,
+  max = 500.0,
+  step = 0.5
+}
 
 [tools.eraser]
 size = 10.0
