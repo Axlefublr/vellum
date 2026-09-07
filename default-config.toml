@@ -7,12 +7,7 @@ feedback_duration_ms = 500
 clear_on_escape = false
 default_fill_shapes = false
 
-size_range = {
-  min = 1.0,
-  max = 100.0,
-  step = 1.0,
-  stops = []
-}
+size_range = { min = 1.0, max = 100.0, step = 1.0 }
 
 palette = [
   "#E84046",
@@ -26,7 +21,7 @@ palette = [
 ]
 
 [tools]
-eraser = { size = 10.0 }
+eraser.size = 10.0
 pen = { opacity = 1.0, roundness = 1.0 }
 line = { opacity = 1.0, roundness = 0.5 }
 arrow = { opacity = 1.0, roundness = 0.25 }
@@ -39,6 +34,5 @@ size = 16.0
 opacity = 1.0
 roundness = 0.1
 background = false
-
 font = { family = "sans-serif", weight = 400, style = "normal" }
 size_range = { min = 8.0, max = 500.0, step = 0.5 }
