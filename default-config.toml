@@ -25,45 +25,20 @@ palette = [
   "#141414",
 ]
 
-[tools.pen]
-opacity = 1.0
-roundness = 1.0
-
-[tools.line]
-opacity = 1.0
-roundness = 0.5
-
-[tools.arrow]
-opacity = 1.0
-roundness = 0.25
-
-[tools.triangle]
-opacity = 1.0
-roundness = 0.0
-filled = false
-
-[tools.rectangle]
-opacity = 1.0
-roundness = 0.01
-filled = false
-
-[tools.ellipse]
-opacity = 1.0
-filled = false
+[tools]
+eraser = { size = 10.0 }
+pen = { opacity = 1.0, roundness = 1.0 }
+line = { opacity = 1.0, roundness = 0.5 }
+arrow = { opacity = 1.0, roundness = 0.25 }
+triangle = { opacity = 1.0, roundness = 0.0, filled = false }
+rectangle = { opacity = 1.0, roundness = 0.01, filled = false }
+ellipse = { opacity = 1.0, filled = false }
 
 [tools.text]
-font_family = "sans-serif"
-font_weight = 400
-font_style = "normal"
 size = 16.0
 opacity = 1.0
 roundness = 0.1
 background = false
-size_range = {
-  min = 8.0,
-  max = 500.0,
-  step = 0.5
-}
 
-[tools.eraser]
-size = 10.0
+font = { family = "sans-serif", weight = 400, style = "normal" }
+size_range = { min = 8.0, max = 500.0, step = 0.5 }

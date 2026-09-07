@@ -193,15 +193,15 @@ Set these properties under `[tools.<tool>]`.
 
 | Property | Type | Supported tools | Description |
 | --- | --- | --- | --- |
-| `size` | float | All except `select` | Initial logical-pixel size. Pen, line, arrow, and shapes inherit `stroke_size`. Text defaults to `16.0` and eraser to `10.0` |
+| `size` | float | All except `select` | Initial logical-pixel size. Pen, line, arrow, and shapes inherit `stroke_size` |
 | `size_range` | table | All except `select` | Overrides the matching global fields. `stops = []` removes inherited stops |
 | `opacity` | float | All except `eraser` and `select` | Initial opacity from `0.05` to `1.0`. Overrides `default_color` alpha |
 | `roundness` | float | `pen`, `line`, `arrow`, `triangle`, `rectangle`, `text` | Initial roundness from `0.0` to `1.0` |
 | `filled` | boolean | `triangle`, `rectangle`, `ellipse` | Initial fill state. Inherits `default_fill_shapes` when omitted |
 | `background` | boolean | `text` | Whether text starts with an automatic black or white background |
-| `font_family` | string | `text` | Ordered CSS font-family list, such as `"Inter, Noto Sans, sans-serif"` |
-| `font_weight` | number | `text` | Weight from `1` to `1000`. Defaults to `400`; `700` is bold |
-| `font_style` | string | `text` | `"normal"`, `"italic"`, or `"oblique"`. Defaults to `"normal"` |
+| `font.family` | string | `text` | Ordered CSS font-family list, such as `"Inter, Noto Sans, sans-serif"` |
+| `font.weight` | number | `text` | Weight from `1` to `1000` (`700` is bold) |
+| `font.style` | string | `text` | `"normal"`, `"italic"`, or `"oblique"` |
 
 ### Defaults
 

@@ -145,32 +145,37 @@ pub(crate) struct PropertyDefaults {
     pub(crate) roundness: Option<f32>,
     pub(crate) filled: Option<bool>,
     pub(crate) background: Option<bool>,
-    font_family: Option<String>,
-    font_weight: Option<f32>,
-    font_style: Option<String>,
+    font: Option<FontConfig>,
 }
 
-impl PropertyDefaults {
-    fn text_font(&self) -> Result<crate::render::TextFont, String> {
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FontConfig {
+    family: Option<String>,
+    weight: Option<f32>,
+    style: Option<String>,
+}
+
+impl FontConfig {
+    fn resolve(&self) -> Result<crate::render::TextFont, String> {
         use parley::style::{FontFamilyName, FontStyle, FontWeight};
 
-        let family =
-            FontFamilyName::parse_css_list(self.font_family.as_deref().unwrap_or("sans-serif"))
-                .map(|name| name.map(FontFamilyName::into_owned))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| format!("invalid tools.text.font_family: {error}"))?;
+        let family = FontFamilyName::parse_css_list(self.family.as_deref().unwrap_or("sans-serif"))
+            .map(|name| name.map(FontFamilyName::into_owned))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("invalid tools.text.font.family: {error}"))?;
         if family.is_empty() {
-            return Err("tools.text.font_family must not be empty".into());
+            return Err("tools.text.font.family must not be empty".into());
         }
-        let weight = self.font_weight.unwrap_or(400.0);
+        let weight = self.weight.unwrap_or(400.0);
         if !weight.is_finite() || !(1.0..=1000.0).contains(&weight) {
-            return Err("tools.text.font_weight must be between 1 and 1000".into());
+            return Err("tools.text.font.weight must be between 1 and 1000".into());
         }
-        let style = match self.font_style.as_deref().unwrap_or("normal") {
+        let style = match self.style.as_deref().unwrap_or("normal") {
             "normal" => FontStyle::Normal,
             "italic" => FontStyle::Italic,
             "oblique" => FontStyle::Oblique(Some(14.0)),
-            _ => return Err("tools.text.font_style must be normal, italic, or oblique".into()),
+            _ => return Err("tools.text.font.style must be normal, italic, or oblique".into()),
         };
         Ok(crate::render::TextFont {
             family,
@@ -271,11 +276,7 @@ fn validate_tool_defaults(
         if defaults.background.is_some() && tool != state::Tool::Text {
             return Err(format!("{prefix}.background is not supported"));
         }
-        if tool != state::Tool::Text
-            && (defaults.font_family.is_some()
-                || defaults.font_weight.is_some()
-                || defaults.font_style.is_some())
-        {
+        if defaults.font.is_some() && tool != state::Tool::Text {
             return Err(format!("{prefix} does not support font settings"));
         }
     }
@@ -365,8 +366,9 @@ impl Settings {
         let text_font = file
             .tools
             .get(&state::Tool::Text)
-            .unwrap_or(&PropertyDefaults::default())
-            .text_font()?;
+            .and_then(|defaults| defaults.font.as_ref())
+            .unwrap_or(&FontConfig::default())
+            .resolve()?;
 
         Ok(Self {
             draw_on: file.draw_on.unwrap_or_default(),
