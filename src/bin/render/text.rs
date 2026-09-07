@@ -22,6 +22,7 @@ pub(crate) struct TextFont {
     pub family: Vec<parley::style::FontFamilyName<'static>>,
     pub weight: parley::style::FontWeight,
     pub style: parley::style::FontStyle,
+    pub features: Vec<parley::style::FontFeature>,
 }
 
 // Font preferences are fixed at startup, before any layout caches are created.
@@ -31,12 +32,13 @@ pub(crate) fn init_text_font(font: TextFont) {
     TEXT_FONT.set(font).expect("text font initialized once");
 }
 
-pub(crate) fn text_styles() -> [StyleProperty<'static, ()>; 4] {
+pub(crate) fn text_styles() -> [StyleProperty<'static, ()>; 5] {
     let font = TEXT_FONT.get().expect("text font initialized at startup");
     [
         StyleProperty::FontFamily(font.family.as_slice().into()),
         StyleProperty::FontWeight(font.weight),
         StyleProperty::FontStyle(font.style),
+        StyleProperty::FontFeatures(font.features.as_slice().into()),
         StyleProperty::LineHeight(LineHeight::FontSizeRelative(LINE_HEIGHT_SCALE)),
     ]
 }

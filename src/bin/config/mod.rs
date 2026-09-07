@@ -154,11 +154,14 @@ struct FontConfig {
     family: Option<String>,
     weight: Option<f32>,
     style: Option<String>,
+    #[serde(default)]
+    features: BTreeMap<String, u16>,
 }
 
 impl FontConfig {
     fn resolve(&self) -> Result<crate::render::TextFont, String> {
-        use parley::style::{FontFamilyName, FontStyle, FontWeight};
+        use parley::setting::Tag;
+        use parley::style::{FontFamilyName, FontFeature, FontStyle, FontWeight};
 
         let family = FontFamilyName::parse_css_list(self.family.as_deref().unwrap_or("sans-serif"))
             .map(|name| name.map(FontFamilyName::into_owned))
@@ -177,10 +180,23 @@ impl FontConfig {
             "oblique" => FontStyle::Oblique(Some(14.0)),
             _ => return Err("tools.text.font.style must be normal, italic, or oblique".into()),
         };
+        let features = self
+            .features
+            .iter()
+            .map(|(name, &value)| {
+                let tag = Tag::parse(name).ok_or_else(|| {
+                    format!(
+                        "invalid tools.text.font.features tag {name:?}: expected four printable ASCII characters"
+                    )
+                })?;
+                Ok(FontFeature::new(tag, value))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(crate::render::TextFont {
             family,
             weight: FontWeight::new(weight),
             style,
+            features,
         })
     }
 }

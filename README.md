@@ -179,10 +179,10 @@ Vellum looks for `vellum/config.toml` in `$XDG_CONFIG_HOME` (default `~/.config`
 | `draw_on` | string | Where drawing can start: `all` monitors or only the `current` monitor |
 | `default_tool` | string | Startup tool: `pen`, `line`, `arrow`, `triangle`, `rectangle`, `ellipse`, `text`, `eraser`, or `select` |
 | `remember_last_tool` | boolean | Keep the selected tool when drawing mode is reopened |
-| `stroke_size` | float | Initial size shared by pen, line, arrow, and shape tools |
+| `stroke_size` | number | Initial size shared by pen, line, arrow, and shape tools |
 | `size_range` | table | Optional `min`, `max`, `step`, and `stops` for scrolling through sizes and pausing at each stop |
-| `default_color` | string | Initial CSS color. It must be present in `palette` |
-| `palette` | array of strings | Between 2 and 12 CSS colors |
+| `default_color` | string | Initial [CSS color](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Values/color_value#syntax). It must be present in `palette` |
+| `palette` | array of strings | Between 2 and 12 [CSS colors](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Values/color_value#syntax) |
 | `feedback_duration_ms` | integer | How long property feedback remains visible, from `0` to `60000` milliseconds |
 | `clear_on_escape` | boolean | Clear annotations when Escape deactivates drawing mode |
 | `default_fill_shapes` | boolean | Initially fill triangles, rectangles, and ellipses |
@@ -193,15 +193,16 @@ Set these properties under `[tools.<tool>]`.
 
 | Property | Type | Supported tools | Description |
 | --- | --- | --- | --- |
-| `size` | float | All except `select` | Initial logical-pixel size. Pen, line, arrow, and shapes inherit `stroke_size` |
+| `size` | number | All except `select` | Initial logical-pixel size. Pen, line, arrow, and shapes inherit `stroke_size` |
 | `size_range` | table | All except `select` | Overrides the matching global fields. `stops = []` removes inherited stops |
-| `opacity` | float | All except `eraser` and `select` | Initial opacity from `0.05` to `1.0`. Overrides `default_color` alpha |
-| `roundness` | float | `pen`, `line`, `arrow`, `triangle`, `rectangle`, `text` | Initial roundness from `0.0` to `1.0` |
-| `filled` | boolean | `triangle`, `rectangle`, `ellipse` | Initial fill state. Inherits `default_fill_shapes` when omitted |
+| `opacity` | number | All except `eraser` and `select` | Initial opacity from `0.05` to `1.0`. Overrides `default_color` alpha |
+| `roundness` | number | `pen`, `line`, `arrow`, `triangle`, `rectangle`, `text` | Initial roundness from `0.0` to `1.0` |
+| `filled` | boolean | `triangle`, `rectangle`, `ellipse` | Initial fill state |
 | `background` | boolean | `text` | Whether text starts with an automatic black or white background |
-| `font.family` | string | `text` | Ordered CSS font-family list, such as `"Inter, Noto Sans, sans-serif"` |
-| `font.weight` | number | `text` | Weight from `1` to `1000` (`700` is bold) |
-| `font.style` | string | `text` | `"normal"`, `"italic"`, or `"oblique"` |
+| `font.family` | string | `text` | Ordered [CSS font-family list](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/font-family#values) |
+| `font.weight` | number | `text` | [Weight](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/font-weight#common_weight_name_mapping) from `1` to `1000` |
+| `font.style` | string | `text` | Font style: `"normal"`, `"italic"`, or `"oblique"` |
+| `font.features` | table | `text` | [OpenType feature tags](https://sparanoid.com/lab/opentype-features/) (`0` disables, `1` enables). For example: `zero = 1`, `tnum = 1`, `liga = 0` |
 
 ### Defaults
 

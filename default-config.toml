@@ -1,13 +1,12 @@
 draw_on = "all"
 default_tool = "pen"
 remember_last_tool = true
-stroke_size = 5.0
+stroke_size = 5
 default_color = "#E84046"
 feedback_duration_ms = 500
 clear_on_escape = false
 default_fill_shapes = false
-
-size_range = { min = 1.0, max = 100.0, step = 1.0 }
+size_range = { min = 1, max = 100, step = 1, stops = [] }
 
 palette = [
   "#E84046",
@@ -21,18 +20,18 @@ palette = [
 ]
 
 [tools]
-eraser.size = 10.0
-pen = { opacity = 1.0, roundness = 1.0 }
-line = { opacity = 1.0, roundness = 0.5 }
-arrow = { opacity = 1.0, roundness = 0.25 }
-triangle = { opacity = 1.0, roundness = 0.0, filled = false }
-rectangle = { opacity = 1.0, roundness = 0.01, filled = false }
-ellipse = { opacity = 1.0, filled = false }
+eraser.size = 10
+pen = { opacity = 1, roundness = 1 }
+line = { opacity = 1, roundness = 0.5 }
+arrow = { opacity = 1, roundness = 0.25 }
+ellipse = { opacity = 1, filled = false }
+triangle = { opacity = 1, roundness = 0.0, filled = false }
+rectangle = { opacity = 1, roundness = 0.01, filled = false }
 
 [tools.text]
-size = 16.0
-opacity = 1.0
+size = 16
+opacity = 1
 roundness = 0.1
 background = false
-font = { family = "sans-serif", weight = 400, style = "normal" }
-size_range = { min = 8.0, max = 500.0, step = 0.5 }
+font = { family = "sans-serif", weight = 400, style = "normal", features = {} }
+size_range = { min = 8, max = 500, step = 0.5 }
