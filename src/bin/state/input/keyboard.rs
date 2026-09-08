@@ -32,6 +32,7 @@ enum LogicalKey {
 struct KeyChord {
     key: LogicalKey,
     modifiers: Modifiers,
+    composed: bool,
 }
 
 fn resolve_keybinding(chord: &KeyChord, editing_text: bool) -> Option<Action> {
@@ -107,6 +108,8 @@ fn resolve_keybinding(chord: &KeyChord, editing_text: bool) -> Option<Action> {
 pub(in crate::state) struct KeyboardState {
     context: xkb::Context,
     state: Option<xkb::State>,
+    compose: Option<xkb::compose::State>,
+    compose_session: Option<u64>,
     repeat: Option<KeyRepeat>,
     repeat_delay: Duration,
     repeat_interval: Option<Duration>,
@@ -114,13 +117,26 @@ pub(in crate::state) struct KeyboardState {
 
 struct KeyRepeat {
     key: u32,
+    composed_text: Option<String>,
     next: Instant,
 }
 
 impl Default for KeyboardState {
     fn default() -> Self {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let locale = ["LC_ALL", "LC_CTYPE", "LANG"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .find(|locale| !locale.is_empty())
+            .unwrap_or_else(|| "C".into());
+        let compose =
+            xkb::compose::Table::new_from_locale(&context, &locale, xkb::compose::COMPILE_NO_FLAGS)
+                .ok()
+                .map(|table| xkb::compose::State::new(&table, xkb::compose::STATE_NO_FLAGS));
         Self {
-            context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
+            context,
+            compose,
+            compose_session: None,
             state: None,
             repeat: None,
             repeat_delay: Duration::ZERO,
@@ -131,6 +147,7 @@ impl Default for KeyboardState {
 
 impl KeyboardState {
     pub(in crate::state) fn clear(&mut self) {
+        self.reset_compose();
         self.state = None;
         self.repeat = None;
         self.repeat_delay = Duration::ZERO;
@@ -138,6 +155,7 @@ impl KeyboardState {
     }
 
     fn set_keymap(&mut self, fd: OwnedFd, size: u32) -> std::io::Result<()> {
+        self.reset_compose();
         self.repeat = None;
         self.state = None;
         // SAFETY: Wayland transfers ownership of a valid keymap fd and supplies its mapping size.
@@ -171,11 +189,12 @@ impl KeyboardState {
         }
     }
 
-    fn chord(&self, evdev_key: u32) -> Option<KeyChord> {
+    fn chord(&mut self, evdev_key: u32, compose_enabled: bool) -> Option<KeyChord> {
         let state = self.state.as_ref()?;
         let keycode = (evdev_key + KEYCODE_OFFSET).into();
         let keysym = state.key_get_one_sym(keycode);
         let modifiers = self.modifiers();
+        let mut composed = false;
         let key = match keysym {
             value if value.raw() == xkb::keysyms::KEY_Escape => LogicalKey::Escape,
             value if value.raw() == xkb::keysyms::KEY_Delete => LogicalKey::Delete,
@@ -195,11 +214,31 @@ impl KeyboardState {
             value if value.raw() == xkb::keysyms::KEY_Home => LogicalKey::Home,
             value if value.raw() == xkb::keysyms::KEY_End => LogicalKey::End,
             _ => {
-                let text = if modifiers.ctrl {
+                let mut text = if modifiers.ctrl {
                     xkb::keysym_to_utf8(keysym)
                 } else {
                     state.key_get_utf8(keycode)
                 };
+                if compose_enabled
+                    && !modifiers.ctrl
+                    && !modifiers.alt
+                    && let Some(compose) = &mut self.compose
+                {
+                    compose.feed(keysym);
+                    match compose.status() {
+                        xkb::compose::Status::Composing => text.clear(),
+                        xkb::compose::Status::Cancelled => {
+                            compose.reset();
+                            text.clear();
+                        }
+                        xkb::compose::Status::Composed => {
+                            text = compose.utf8().unwrap_or_default();
+                            compose.reset();
+                            composed = true;
+                        }
+                        xkb::compose::Status::Nothing => {}
+                    }
+                }
                 if text.is_empty() {
                     LogicalKey::Other
                 } else {
@@ -207,7 +246,17 @@ impl KeyboardState {
                 }
             }
         };
-        Some(KeyChord { key, modifiers })
+        if modifiers.ctrl
+            || modifiers.alt
+            || !matches!(key, LogicalKey::Character(_) | LogicalKey::Other)
+        {
+            self.reset_compose();
+        }
+        Some(KeyChord {
+            key,
+            modifiers,
+            composed,
+        })
     }
 
     fn set_repeat_info(&mut self, rate: i32, delay: i32) {
@@ -221,7 +270,15 @@ impl KeyboardState {
         }
     }
 
-    fn update_repeat(&mut self, key: u32, handled: bool) {
+    fn update_repeat(&mut self, key: u32, handled: bool, composed_text: Option<String>) {
+        if self
+            .compose
+            .as_ref()
+            .is_some_and(|compose| compose.status() == xkb::compose::Status::Composing)
+        {
+            self.repeat = None;
+            return;
+        }
         let Some(state) = &self.state else {
             return;
         };
@@ -229,6 +286,7 @@ impl KeyboardState {
         if state.get_keymap().key_repeats(keycode) {
             self.repeat = self.repeat_interval.filter(|_| handled).map(|_| KeyRepeat {
                 key,
+                composed_text,
                 next: Instant::now() + self.repeat_delay,
             });
         }
@@ -242,6 +300,20 @@ impl KeyboardState {
 
     pub(in crate::state) fn cancel_repeat(&mut self) {
         self.repeat = None;
+        self.reset_compose();
+    }
+
+    pub(in crate::state) fn reset_compose(&mut self) {
+        if let Some(compose) = &mut self.compose {
+            compose.reset();
+        }
+    }
+
+    fn sync_text_session(&mut self, session: Option<u64>) {
+        if self.compose_session != session {
+            self.cancel_repeat();
+            self.compose_session = session;
+        }
     }
 
     pub(in crate::state) fn next_wakeup(&self) -> Option<Instant> {
@@ -251,16 +323,23 @@ impl KeyboardState {
     pub(in crate::state) fn repeat_action(
         &mut self,
         now: Instant,
-        editing_text: bool,
+        text_session: Option<u64>,
     ) -> Option<Action> {
+        self.sync_text_session(text_session);
         let repeat = self.repeat.as_mut()?;
         if now < repeat.next {
             return None;
         }
         let key = repeat.key;
+        let composed_text = repeat.composed_text.clone();
         repeat.next = now + self.repeat_interval?;
-        let chord = self.chord(key)?;
-        resolve_keybinding(&chord, editing_text)
+        let mut chord = self.chord(key, false)?;
+        if !chord.modifiers.ctrl
+            && let Some(text) = composed_text
+        {
+            chord.key = LogicalKey::Character(text);
+        }
+        resolve_keybinding(&chord, text_session.is_some())
     }
 }
 
@@ -307,14 +386,22 @@ impl Dispatch<WlKeyboard, ()> for State {
                 state: WEnum::Value(KeyState::Pressed),
                 ..
             } if state.active => {
-                let action = state
-                    .keyboard
-                    .chord(key)
-                    .and_then(|chord| resolve_keybinding(&chord, state.draw.is_editing_text()));
+                let session = state
+                    .draw
+                    .text_input_snapshot()
+                    .map(|snapshot| snapshot.session);
+                state.keyboard.sync_text_session(session);
+                let editing = state.draw.is_editing_text();
+                let chord = state.keyboard.chord(key, editing);
+                let composed_text = chord.as_ref().and_then(|chord| match &chord.key {
+                    LogicalKey::Character(text) if chord.composed => Some(text.clone()),
+                    _ => None,
+                });
+                let action = chord.and_then(|chord| resolve_keybinding(&chord, editing));
                 let repeatable = action
                     .as_ref()
                     .is_some_and(|action| !matches!(action, Action::ToggleFill));
-                state.keyboard.update_repeat(key, repeatable);
+                state.keyboard.update_repeat(key, repeatable, composed_text);
                 if let Some(action) = action {
                     state.apply_action(action);
                 }

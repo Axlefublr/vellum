@@ -785,10 +785,12 @@ impl State {
     }
 
     pub fn handle_timeouts(&mut self, now: std::time::Instant) {
-        if let Some(action) = self
-            .keyboard
-            .repeat_action(now, self.draw.is_editing_text())
-        {
+        if let Some(action) = self.keyboard.repeat_action(
+            now,
+            self.draw
+                .text_input_snapshot()
+                .map(|snapshot| snapshot.session),
+        ) {
             self.apply_action(action);
         }
         if self.draw.handle_timeouts(now) {
