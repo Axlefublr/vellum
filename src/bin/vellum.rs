@@ -16,7 +16,7 @@ mod state;
 
 use cli::{Cli, Command};
 use config::Settings;
-use protocol::{CONTROL_SOCKET, ControlSocket};
+use protocol::{ControlSocket, control_socket_name};
 
 const MAX_SOCKET_MESSAGE: usize = 4096;
 pub(crate) type Rgba = [f32; 4];
@@ -60,7 +60,7 @@ fn run() -> Result<ExitCode, String> {
 
 fn send_command(command: &Command) -> Result<(), String> {
     let socket_addr =
-        SocketAddr::from_abstract_name(CONTROL_SOCKET).map_err(|error| error.to_string())?;
+        SocketAddr::from_abstract_name(control_socket_name()).map_err(|error| error.to_string())?;
     let socket = UnixDatagram::unbound().map_err(|error| error.to_string())?;
     socket
         .connect_addr(&socket_addr)
@@ -75,7 +75,7 @@ fn send_command(command: &Command) -> Result<(), String> {
 
 fn query(request: Command) -> Result<bool, String> {
     let socket_addr =
-        SocketAddr::from_abstract_name(CONTROL_SOCKET).map_err(|error| error.to_string())?;
+        SocketAddr::from_abstract_name(control_socket_name()).map_err(|error| error.to_string())?;
     let reply_name = format!(
         "vellum-query-{}-{}",
         std::process::id(),

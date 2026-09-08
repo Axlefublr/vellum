@@ -10,7 +10,22 @@ use rustix::net::{
 
 use crate::cli::Command;
 
-pub const CONTROL_SOCKET: &str = "vellum.sock";
+pub fn control_socket_name() -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    let display = std::env::var_os("WAYLAND_DISPLAY").unwrap_or_else(|| "wayland-0".into());
+    let socket = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_default())
+        .join(display);
+    let socket = socket.canonicalize().unwrap_or(socket);
+    // FNV-1a keeps the name short and stable across installed and development builds.
+    let hash = socket
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("vellum-{}-{hash:016x}", rustix::process::geteuid().as_raw()).into_bytes()
+}
 
 pub struct ControlSocket {
     pub socket: UnixDatagram,
@@ -21,7 +36,7 @@ impl ControlSocket {
         let socket = UnixDatagram::unbound().map_err(|error| error.to_string())?;
         rustix::net::sockopt::set_socket_passcred(&socket, true)
             .map_err(|error| format!("could not enable control socket credentials: {error}"))?;
-        let address = SocketAddrUnix::new_abstract_name(CONTROL_SOCKET.as_bytes())
+        let address = SocketAddrUnix::new_abstract_name(&control_socket_name())
             .map_err(|error| format!("invalid control socket name: {error}"))?;
         rustix::net::bind(&socket, &address)
             .map_err(|error| format!("could not bind control socket: {error}"))?;
