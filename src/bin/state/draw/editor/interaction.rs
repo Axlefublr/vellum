@@ -61,7 +61,9 @@ pub(super) enum Interaction {
         equal_side_anchor: Option<usize>,
     },
     EditingText(TextEdit),
-    Erasing,
+    Erasing {
+        previous: Point,
+    },
 }
 
 impl Editor {
@@ -119,8 +121,8 @@ impl Editor {
         let previous = self.finish_interaction();
         let effective_tool = tool_override.effective_tool(self.tool);
         if effective_tool == Tool::Eraser {
-            self.interaction = Some(Interaction::Erasing);
-            return previous | self.erase_at(point);
+            self.interaction = Some(Interaction::Erasing { previous: point });
+            return previous | self.erase_between(point, point);
         }
 
         match effective_tool {
@@ -243,7 +245,10 @@ impl Editor {
                 *current_point = point;
                 true
             }
-            Some(Interaction::Erasing) => self.erase_at(point),
+            Some(Interaction::Erasing { previous }) => {
+                let start = std::mem::replace(previous, point);
+                self.erase_between(start, point)
+            }
             Some(Interaction::Freehand(_)) | None => false,
         }
     }
@@ -322,7 +327,7 @@ impl Editor {
                 }
                 true
             }
-            Some(Interaction::Erasing) => false,
+            Some(Interaction::Erasing { previous }) => self.erase_between(previous, point),
             interaction => {
                 self.interaction = interaction;
                 false
@@ -362,7 +367,7 @@ impl Editor {
             Some(Interaction::EditingText(_)) => {
                 return Cursor::Shape(selection::CursorHint::Text);
             }
-            Some(Interaction::Erasing) => return self.tool_cursor(Tool::Eraser),
+            Some(Interaction::Erasing { .. }) => return self.tool_cursor(Tool::Eraser),
             _ => {}
         }
         if self.picker.is_some() {

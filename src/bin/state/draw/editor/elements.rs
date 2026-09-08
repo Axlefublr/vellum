@@ -130,19 +130,19 @@ impl Editor {
         self.remove_ids(&[id])
     }
 
-    pub(super) fn erase_at(&mut self, point: Point) -> bool {
+    pub(super) fn erase_between(&mut self, start: Point, end: Point) -> bool {
         let radius = self
             .properties(super::super::tool::Tool::Eraser)
             .expect("eraser has adjustable properties")
             .size
             * 0.5;
-        let hit = self
+        let hits = self
             .elements
             .iter()
-            .rev()
-            .find(|element| element.erase_hit_test(point, radius))
-            .map(|element| element.id);
-        hit.is_some_and(|id| self.remove_id(id))
+            .filter(|element| element.erase_hit_test(start, end, radius))
+            .map(|element| element.id)
+            .collect::<Vec<_>>();
+        self.remove_ids(&hits)
     }
 
     pub(super) fn commit_text(&mut self) -> bool {

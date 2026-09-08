@@ -158,6 +158,13 @@ impl Bounds {
             && point.y >= self.min.y
             && point.y <= self.max.y
     }
+
+    pub(super) fn intersects(self, other: Self) -> bool {
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -259,14 +266,31 @@ impl Element {
     }
 
     pub(super) fn hit_test(&self, point: Point) -> bool {
-        self.hit_test_with_slop(point, HIT_SLOP, false)
+        self.hit_test_with_slop(point, HIT_SLOP)
     }
 
-    pub(super) fn erase_hit_test(&self, point: Point, radius: f32) -> bool {
-        self.hit_test_with_slop(point, radius, true)
+    pub(super) fn erase_hit_test(&self, start: Point, end: Point, radius: f32) -> bool {
+        use kurbo::Shape;
+        let swept_bounds = Bounds::from_points([start, end]).expanded(radius);
+        if !self.bounds.intersects(swept_bounds) {
+            return false;
+        }
+        let line = kurbo::Line::new(kurbo_point(start), kurbo_point(end));
+        if matches!(self.kind, ElementKind::Text { .. }) {
+            let path = kurbo::Rect::new(
+                f64::from(self.bounds.min.x),
+                f64::from(self.bounds.min.y),
+                f64::from(self.bounds.max.x),
+                f64::from(self.bounds.max.y),
+            )
+            .to_path(0.1);
+            return Geometry::fill(path, Fill::NonZero, self.style.color)
+                .swept_hit_test(line, f64::from(radius));
+        }
+        self.geometry.swept_hit_test(line, f64::from(radius))
     }
 
-    fn hit_test_with_slop(&self, point: Point, slop: f32, expand_text: bool) -> bool {
+    fn hit_test_with_slop(&self, point: Point, slop: f32) -> bool {
         if !self.bounds.expanded(slop).contains(point) {
             return false;
         }
@@ -281,20 +305,10 @@ impl Element {
             }
             ElementKind::Freehand { .. }
             | ElementKind::Segment { arrow: true, .. }
+            | ElementKind::Rectangle { .. }
             | ElementKind::Triangle { .. } => self
                 .geometry
                 .fill_hit_test(kurbo_point(point), f64::from(slop)),
-            ElementKind::Rectangle { min, max } => {
-                let (min, max) = pixel_aligned_rectangle(*min, *max, self.style.size);
-                rounded_rectangle_hit(
-                    min,
-                    max,
-                    self.style.roundness,
-                    self.style.filled,
-                    point,
-                    tolerance,
-                )
-            }
             ElementKind::Ellipse { center, radii } => {
                 let local = point - *center;
                 (self.style.filled
@@ -303,13 +317,7 @@ impl Element {
                     && (local.x / radii.x).powi(2) + (local.y / radii.y).powi(2) <= 1.0)
                     || ellipse_distance(local, *radii) <= tolerance
             }
-            ElementKind::Text { .. } => {
-                if expand_text {
-                    self.bounds.expanded(slop).contains(point)
-                } else {
-                    self.bounds.contains(point)
-                }
-            }
+            ElementKind::Text { .. } => self.bounds.contains(point),
         }
     }
 }
@@ -512,10 +520,6 @@ pub(super) fn rendered_segment_endpoints(kind: &ElementKind, style: Style) -> Op
     Some([start, end])
 }
 
-fn rectangle_radius(min: Point, max: Point, roundness: f32) -> f32 {
-    ((max.x - min.x).abs().min((max.y - min.y).abs()) * 0.5) * roundness
-}
-
 fn rectangle_geometry(min: Point, max: Point, style: Style) -> Geometry {
     use kurbo::Shape;
 
@@ -568,26 +572,6 @@ fn rectangle_geometry(min: Point, max: Point, style: Style) -> Geometry {
         }
     }
     Geometry::fill(path, Fill::EvenOdd, style.color)
-}
-
-fn rounded_rectangle_hit(
-    min: Point,
-    max: Point,
-    roundness: f32,
-    filled: bool,
-    point: Point,
-    tolerance: f32,
-) -> bool {
-    let radius = rectangle_radius(min, max, roundness);
-    let center = min.midpoint(max);
-    let x = (point.x - center.x).abs() - ((max.x - min.x) * 0.5 - radius);
-    let y = (point.y - center.y).abs() - ((max.y - min.y) * 0.5 - radius);
-    let distance = x.max(0.0).hypot(y.max(0.0)) + x.max(y).min(0.0) - radius;
-    if filled {
-        distance <= tolerance
-    } else {
-        distance.abs() <= tolerance
-    }
 }
 
 pub(super) fn tool_for(kind: &ElementKind) -> super::tool::Tool {

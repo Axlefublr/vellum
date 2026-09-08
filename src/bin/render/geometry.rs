@@ -1,4 +1,4 @@
-use kurbo::{Affine, BezPath, ParamCurveNearest, Shape, Stroke};
+use kurbo::{Affine, BezPath, ParamCurve, ParamCurveNearest, Shape, Stroke};
 use peniko::Fill;
 
 #[derive(Debug, Clone)]
@@ -105,6 +105,60 @@ impl Geometry {
                 Fill::NonZero => winding != 0,
                 Fill::EvenOdd => winding % 2 != 0,
             }
+        })
+    }
+
+    pub fn swept_hit_test(&self, line: kurbo::Line, radius: f64) -> bool {
+        let delta = line.p1 - line.p0;
+        let length = delta.hypot();
+        let to_local =
+            Affine::rotate(-delta.y.atan2(delta.x)) * Affine::translate(-line.p0.to_vec2());
+        self.commands.iter().any(|command| {
+            let (path, tolerance, fill_rule) = match command {
+                DrawCommand::Fill {
+                    path, fill_rule, ..
+                } => (path, radius, Some(fill_rule)),
+                DrawCommand::Stroke { path, stroke, .. } => {
+                    (path, radius + stroke.width * 0.5, None)
+                }
+            };
+            let bounds = line.bounding_box().inflate(tolerance, tolerance);
+            let hit_edge = path.segments().any(|segment| {
+                let other = segment.bounding_box();
+                bounds.x0 <= other.x1
+                    && bounds.x1 >= other.x0
+                    && bounds.y0 <= other.y1
+                    && bounds.y1 >= other.y0
+                    && if length == 0.0 {
+                        segment.nearest(line.p0, 0.1).distance_sq <= tolerance * tolerance
+                    } else {
+                        let local = to_local * segment;
+                        // A closest pair lies at an endpoint, a perpendicular extremum,
+                        // or an intersection. Curve parameter tolerances are not pixels.
+                        !segment.intersect_line(line).is_empty()
+                            || kurbo::ParamCurveExtrema::extrema(&local)
+                                .into_iter()
+                                .chain([0.0, 1.0])
+                                .any(|t| {
+                                    let point = local.eval(t);
+                                    point.y.powi(2) + (point.x - point.x.clamp(0.0, length)).powi(2)
+                                        <= tolerance * tolerance
+                                })
+                            || [kurbo::Point::ZERO, kurbo::Point::new(length, 0.0)]
+                                .into_iter()
+                                .any(|point| {
+                                    local.nearest(point, 0.1).distance_sq <= tolerance * tolerance
+                                })
+                    }
+            });
+            hit_edge
+                || fill_rule.is_some_and(|rule| {
+                    let winding = path.winding(line.p0);
+                    match rule {
+                        Fill::NonZero => winding != 0,
+                        Fill::EvenOdd => winding % 2 != 0,
+                    }
+                })
         })
     }
 
