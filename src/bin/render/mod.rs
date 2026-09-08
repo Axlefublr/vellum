@@ -187,6 +187,10 @@ fn create_surface(
 }
 
 impl WgpuState {
+    pub fn size(&self) -> [u32; 2] {
+        [self.surface_config.width, self.surface_config.height]
+    }
+
     pub fn new(
         gpu: &GpuContext,
         surface: wgpu::Surface<'static>,

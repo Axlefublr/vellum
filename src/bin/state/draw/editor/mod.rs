@@ -42,6 +42,7 @@ pub struct EditorEffect {
 pub struct Editor {
     tool: Tool,
     style: Style,
+    // IDs increase on insertion; undo restores the original order.
     elements: Vec<Element>,
     selected: Vec<ElementId>,
     interaction: Option<Interaction>,
@@ -432,6 +433,19 @@ impl Editor {
         }
     }
 
+    pub fn element_bounds_preview(&self, element: &Element) -> super::scene::Bounds {
+        if let Some(Interaction::Resizing { id, current, .. }) = &self.interaction
+            && *id == element.id
+        {
+            return current.bounds;
+        }
+        let offset = self.moving_offset(element.id).unwrap_or_default();
+        super::scene::Bounds {
+            min: element.bounds.min + offset,
+            max: element.bounds.max + offset,
+        }
+    }
+
     pub fn moving_offset(&self, id: ElementId) -> Option<Point> {
         let Some(Interaction::Moving {
             ids,
@@ -441,7 +455,7 @@ impl Editor {
         else {
             return None;
         };
-        ids.contains(&id).then_some(*current - *start)
+        ids.binary_search(&id).is_ok().then_some(*current - *start)
     }
 
     pub fn text_resize_preview(&self, id: ElementId) -> Option<(&ElementKind, Style)> {

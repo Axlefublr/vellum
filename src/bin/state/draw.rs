@@ -102,6 +102,7 @@ struct Feedback {
 pub struct DrawState {
     editor: Editor,
     changed: BTreeMap<OutputId, bool>,
+    viewports: BTreeMap<OutputId, kurbo::Rect>,
     feedback: Option<Feedback>,
     feedback_duration: Duration,
     caret_visible: bool,
@@ -117,6 +118,7 @@ impl DrawState {
         Self {
             editor,
             changed: BTreeMap::new(),
+            viewports: BTreeMap::new(),
             feedback: None,
             feedback_duration,
             caret_visible: true,
@@ -226,8 +228,12 @@ impl DrawState {
         if self.tool_cursor == cursor {
             return false;
         }
+        for (point, cursor) in [self.tool_cursor, cursor].into_iter().flatten() {
+            if let Some(bounds) = tool_cursor_geometry(point, cursor).bounds() {
+                self.damage_region(bounds);
+            }
+        }
         self.tool_cursor = cursor;
-        self.record(true);
         true
     }
 
@@ -286,6 +292,7 @@ impl DrawState {
 
     pub fn remove_output(&mut self, output: OutputId) {
         self.changed.remove(&output);
+        self.viewports.remove(&output);
     }
 
     pub(crate) fn text_input_snapshot(&self) -> Option<TextInputSnapshot<'_>> {
@@ -314,6 +321,19 @@ impl DrawState {
 
     pub fn damage(&mut self, output: OutputId) {
         self.changed.insert(output, true);
+    }
+
+    fn damage_region(&mut self, bounds: kurbo::Rect) {
+        let bounds = bounds.inflate(1.0, 1.0);
+        for (output, changed) in &mut self.changed {
+            if self
+                .viewports
+                .get(output)
+                .is_none_or(|viewport| viewport.intersect(bounds).area() > 0.0)
+            {
+                *changed = true;
+            }
+        }
     }
 
     fn record(&mut self, changed: bool) -> bool {
@@ -345,8 +365,19 @@ impl DrawState {
             self.feedback = None;
             changed = true;
         }
+        let feedback_expired = changed;
         if self.caret_until.is_some_and(|until| now >= until) {
-            if self.editor.is_editing_text() {
+            if let Some(edit) = self.editor.text_edit() {
+                let [x, y] = edit.cursor_position();
+                let [sx, sy] = edit.scale;
+                let caret = text_caret(
+                    edit.origin.x + x * sx,
+                    edit.origin.y + y * sy,
+                    edit.style.size * sy,
+                );
+                if let Some(bounds) = caret.bounds() {
+                    self.damage_region(bounds);
+                }
                 self.caret_visible = !self.caret_visible;
                 self.caret_until = Some(now + CARET_BLINK_INTERVAL);
                 changed = true;
@@ -354,7 +385,7 @@ impl DrawState {
                 self.caret_until = None;
             }
         }
-        if changed {
+        if feedback_expired {
             self.record(true);
         }
         changed
@@ -371,10 +402,32 @@ impl DrawState {
         if !self.needs_render(output) {
             return Ok(());
         }
+        let size = wgpu.size();
+        let viewport = kurbo::Rect::new(
+            f64::from(origin.x),
+            f64::from(origin.y),
+            f64::from(origin.x) + f64::from(size[0]) / scale[0],
+            f64::from(origin.y) + f64::from(size[1]) / scale[1],
+        );
+        self.viewports.insert(output, viewport);
+        let visible = scene::Bounds {
+            min: origin,
+            max: Point::new(viewport.x1 as f32, viewport.y1 as f32),
+        }
+        .expanded(1.0);
         let active_text = self.editor.text_edit();
         let items = {
             let mut items = Vec::with_capacity(self.editor.elements().len());
             for element in self.editor.elements() {
+                // Layout bounds do not include all glyph ink overhangs; keep text conservative.
+                if !matches!(element.kind, ElementKind::Text { .. })
+                    && !self
+                        .editor
+                        .element_bounds_preview(element)
+                        .intersects(visible)
+                {
+                    continue;
+                }
                 if let Some(edit) = active_text.filter(|edit| edit.id == Some(element.id)) {
                     items.push(SceneItem::Text(edit.spec()));
                     continue;
@@ -478,6 +531,11 @@ impl DrawState {
         if let Some((point, cursor)) = self.tool_cursor {
             self.previews.push(tool_cursor_geometry(point, cursor));
         }
+        self.previews.retain(|geometry| {
+            geometry
+                .bounds()
+                .is_some_and(|bounds| bounds.inflate(1.0, 1.0).intersect(viewport).area() > 0.0)
+        });
         let picker = self.editor.picker_geometry();
         if wgpu.render(
             &items,

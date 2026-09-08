@@ -188,8 +188,10 @@ impl Editor {
                         self.selected.clear();
                         self.selected.push(id);
                     }
+                    let mut ids = self.selected.clone();
+                    ids.sort_unstable();
                     self.interaction = Some(Interaction::Moving {
-                        ids: self.selected.clone(),
+                        ids,
                         start: point,
                         current: point,
                     });

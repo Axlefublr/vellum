@@ -47,8 +47,7 @@ fn apply(entry: Entry, elements: &mut Vec<Element>) -> Entry {
             let mut removed = Vec::with_capacity(inserted.len());
             for (index, id) in inserted.into_iter().rev() {
                 let actual = elements
-                    .iter()
-                    .position(|element| element.id == id)
+                    .binary_search_by_key(&id, |element| element.id)
                     .expect("history element exists");
                 removed.push((index, elements.remove(actual)));
             }
@@ -68,10 +67,10 @@ fn apply(entry: Entry, elements: &mut Vec<Element>) -> Entry {
             updates
                 .into_iter()
                 .map(|(id, kind, style)| {
-                    let element = elements
-                        .iter_mut()
-                        .find(|element| element.id == id)
+                    let index = elements
+                        .binary_search_by_key(&id, |element| element.id)
                         .expect("history element exists");
+                    let element = &mut elements[index];
                     let (kind, style) = element.replace(kind, style);
                     (id, kind, style)
                 })

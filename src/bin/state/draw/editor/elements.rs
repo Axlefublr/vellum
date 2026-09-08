@@ -99,18 +99,38 @@ impl Editor {
     }
 
     fn remove_ids(&mut self, ids: &[ElementId]) -> bool {
-        let mut removed = Vec::with_capacity(ids.len());
-        for index in (0..self.elements.len()).rev() {
-            if ids.contains(&self.elements[index].id) {
-                removed.push((index, self.elements.remove(index)));
-            }
-        }
-        if removed.is_empty() {
+        let mut indices: Vec<_> = ids
+            .iter()
+            .filter_map(|id| {
+                self.elements
+                    .binary_search_by_key(id, |element| element.id)
+                    .ok()
+            })
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty() {
             return false;
         }
-        removed.reverse();
+        let mut next = indices.iter().copied().peekable();
+        let mut index = indices[0];
+        let end = indices[indices.len() - 1] + 1;
+        let removed = self
+            .elements
+            .extract_if(index..end, |_| {
+                let remove = next.next_if_eq(&index).is_some();
+                index += 1;
+                remove
+            })
+            .zip(indices.iter().copied())
+            .map(|(element, index)| (index, element))
+            .collect();
         self.history.record(HistoryEntry::Remove(removed));
-        self.selected.retain(|selected| !ids.contains(selected));
+        self.selected.retain(|id| {
+            self.elements
+                .binary_search_by_key(id, |element| element.id)
+                .is_ok()
+        });
         true
     }
 
@@ -200,10 +220,16 @@ impl Editor {
     }
 
     pub(super) fn element(&self, id: ElementId) -> Option<&Element> {
-        self.elements.iter().find(|element| element.id == id)
+        self.elements
+            .binary_search_by_key(&id, |element| element.id)
+            .ok()
+            .map(|index| &self.elements[index])
     }
 
     pub(super) fn element_mut(&mut self, id: ElementId) -> Option<&mut Element> {
-        self.elements.iter_mut().find(|element| element.id == id)
+        self.elements
+            .binary_search_by_key(&id, |element| element.id)
+            .ok()
+            .map(|index| &mut self.elements[index])
     }
 }

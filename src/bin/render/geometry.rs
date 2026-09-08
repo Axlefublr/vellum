@@ -37,6 +37,19 @@ impl LocalGeometry {
 }
 
 impl Geometry {
+    pub fn bounds(&self) -> Option<kurbo::Rect> {
+        self.commands
+            .iter()
+            .map(|command| match command {
+                DrawCommand::Fill { path, .. } => path.control_box(),
+                DrawCommand::Stroke { path, stroke, .. } => {
+                    let expansion = stroke.width * 0.5 * stroke.miter_limit.max(1.0);
+                    path.control_box().inflate(expansion, expansion)
+                }
+            })
+            .reduce(|first, second| first.union(second))
+    }
+
     pub fn fill(path: BezPath, fill_rule: Fill, color: [f32; 4]) -> Self {
         Self {
             commands: vec![DrawCommand::Fill {
