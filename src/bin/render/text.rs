@@ -75,23 +75,18 @@ pub fn text_bounds(
     } else {
         [0.0; 2]
     };
+    // Expand in text space so the background and its editing bounds stretch together.
+    let width = background_roundness.map_or(width, |roundness| {
+        width.max((height + 2.0 * padding_y) * roundness - 2.0 * padding_x)
+    });
     let end_x = left + (width + padding_x) * scale_x;
     let end_y = top + (height + padding_y) * scale_y;
     let start_x = left - padding_x * scale_x;
     let start_y = top - padding_y * scale_y;
-    let mut min_x = start_x.min(end_x);
+    let min_x = start_x.min(end_x);
     let min_y = start_y.min(end_y);
-    let mut max_x = start_x.max(end_x);
+    let max_x = start_x.max(end_x);
     let max_y = start_y.max(end_y);
-    if let Some(roundness) = background_roundness {
-        let radius = (max_y - min_y) * 0.5 * roundness;
-        let missing_width = (2.0 * radius - (max_x - min_x)).max(0.0);
-        if scale_x < 0.0 {
-            min_x -= missing_width;
-        } else {
-            max_x += missing_width;
-        }
-    }
     [[min_x, min_y], [max_x, max_y]]
 }
 
@@ -278,9 +273,23 @@ impl TextSpec<'_> {
         let image = match cache.entry(key) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let Ok(pixmap) = vello_hybrid::Pixmap::from_png(std::io::Cursor::new(data)) else {
+                let Ok(mut pixmap) = vello_hybrid::Pixmap::from_png(std::io::Cursor::new(data))
+                else {
                     return;
                 };
+                if target.is_srgb {
+                    for pixel in pixmap.data_mut() {
+                        let alpha = f32::from(pixel.a);
+                        if alpha > 0.0 {
+                            let convert = |channel| {
+                                (srgb_to_linear(f32::from(channel) / alpha) * alpha).round() as u8
+                            };
+                            pixel.r = convert(pixel.r);
+                            pixel.g = convert(pixel.g);
+                            pixel.b = convert(pixel.b);
+                        }
+                    }
+                }
                 let size = [pixmap.width(), pixmap.height()];
                 let id = target.renderer.upload_image(
                     target.resources,
