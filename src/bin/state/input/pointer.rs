@@ -45,6 +45,7 @@ pub(in crate::state) struct PointerState {
     left_button_held: bool,
     right_button_held: bool,
     middle_button_held: bool,
+    suppressed_gesture: bool,
     left_button_in_picker: bool,
     left_press_pos: Option<(f64, f64)>,
     right_press_time: Option<u32>,
@@ -81,7 +82,8 @@ impl PointerState {
     }
 
     pub(in crate::state) fn input_grab_active(&self) -> bool {
-        self.left_button_held || self.right_button_held || self.middle_button_held
+        !self.suppressed_gesture
+            && (self.left_button_held || self.right_button_held || self.middle_button_held)
     }
 
     pub(in crate::state) fn restore_cursor(&mut self) {
@@ -147,6 +149,7 @@ impl PointerState {
         self.left_button_held = false;
         self.right_button_held = false;
         self.middle_button_held = false;
+        self.suppressed_gesture = false;
         self.left_button_in_picker = false;
         self.left_press_pos = None;
         self.right_press_time = None;
@@ -326,7 +329,9 @@ impl Dispatch<WlPointer, (), State> for PointerState {
         }
         if let Event::Enter { surface, .. } = &event {
             state.pointer.output = state.output_for_surface(surface);
-            if let Some(output) = state.pointer.output {
+            if let Some(output) = state.pointer.output
+                && !state.tablet.input_grab_active()
+            {
                 state.focus_output(output);
             }
         }
@@ -349,6 +354,19 @@ impl Dispatch<WlPointer, (), State> for PointerState {
                     state.pointer.clear_focus();
                 }
                 return;
+            }
+            // Keep tracking releases, but never let a second device take over a drag.
+            if state.tablet.input_grab_active() || state.pointer.suppressed_gesture {
+                state.pointer.suppressed_gesture = state.pointer.left_button_held
+                    || state.pointer.right_button_held
+                    || state.pointer.middle_button_held;
+                if sequence.left_surface && sequence.enter_serial.is_none() {
+                    state.pointer.clear_focus();
+                }
+                return;
+            }
+            if let Some(output) = state.pointer.output {
+                state.focus_output(output);
             }
             let left_pressed = sequence.pressed(LEFT);
             let left_released = sequence.released(LEFT);

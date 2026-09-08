@@ -598,15 +598,14 @@ impl State {
         let point = Point::new(x as f32, y as f32);
         self.pending_pen_motion.reset(None);
         if self.draw.picker_active() {
-            let changed = if tool_override == draw::ToolOverride::Eraser {
-                self.draw.dismiss_picker()
+            if tool_override == draw::ToolOverride::Eraser {
+                self.dismiss_picker();
             } else {
-                self.draw.picker_motion(point)
-            };
-            if changed {
-                self.request_render();
+                if self.draw.picker_motion(point) {
+                    self.request_render();
+                }
+                return;
             }
-            return;
         }
         self.focus_keyboard_on_input();
         let changed = self.draw.pointer_down(point, modifiers, tool_override);
@@ -705,7 +704,9 @@ impl State {
             self.clear_tool_cursor();
             return;
         }
-        if let Some(preview_changed) = self.tablet.refresh_cursor(&mut self.draw) {
+        if !self.pointer.input_grab_active()
+            && let Some(preview_changed) = self.tablet.refresh_cursor(&mut self.draw)
+        {
             if preview_changed {
                 self.request_render();
             }

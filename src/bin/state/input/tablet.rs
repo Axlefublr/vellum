@@ -64,6 +64,7 @@ struct ToolState {
     pos: Option<(f64, f64)>,
     pen_held: bool,
     button_held: bool,
+    suppressed_gesture: bool,
     button_press_time: Option<u32>,
 }
 
@@ -147,6 +148,7 @@ impl TabletState {
             tool.event_sequence.released = 0;
             tool.pen_held = false;
             tool.button_held = false;
+            tool.suppressed_gesture = false;
             tool.button_press_time = None;
         }
     }
@@ -180,6 +182,7 @@ impl TabletState {
             tool.current_cursor = None;
             tool.pen_held = false;
             tool.button_held = false;
+            tool.suppressed_gesture = false;
             tool.button_press_time = None;
         }
         end_position
@@ -384,6 +387,7 @@ impl Dispatch<ZwpTabletToolV2, (), State> for TabletState {
             if !state.active || output.is_none() {
                 tool.pen_held = false;
                 tool.button_held = false;
+                tool.suppressed_gesture = false;
                 tool.button_press_time = None;
                 return;
             }
@@ -405,12 +409,18 @@ impl Dispatch<ZwpTabletToolV2, (), State> for TabletState {
                 tool.button_held = false;
                 tool.button_press_time = None;
             }
+            if state.pointer.input_grab_active() || tool.suppressed_gesture {
+                tool.suppressed_gesture = !sequence.proximity_out && (pen_held || button_held);
+                tool.button_press_time = None;
+                return;
+            }
             if state
                 .tablet
                 .gesture_owner
                 .as_ref()
                 .is_some_and(|owner| owner != &id)
             {
+                tool.suppressed_gesture = !sequence.proximity_out && (pen_held || button_held);
                 return;
             }
             if (pen_pressed || button_pressed) && pos.is_some() {
