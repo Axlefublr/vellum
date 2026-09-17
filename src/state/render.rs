@@ -8,7 +8,7 @@ use crate::OutputId;
 
 impl State {
     pub(super) fn render(&mut self, output: OutputId) {
-        if self.fatal_error.is_some() {
+        if self.fatal_error.is_some() || self.freeze.hides(output) {
             return;
         }
         if let Some(output_state) = self.wayland.outputs.get_mut(&output) {
@@ -47,10 +47,12 @@ impl State {
             .draw
             .damaged_outputs()
             .filter(|id| {
-                self.wayland
-                    .outputs
-                    .get(id)
-                    .is_some_and(|output| !output.frame_pending && output.wgpu.is_some())
+                !self.freeze.hides(*id)
+                    && self
+                        .wayland
+                        .outputs
+                        .get(id)
+                        .is_some_and(|output| !output.frame_pending && output.wgpu.is_some())
             })
             .collect();
         for id in outputs {

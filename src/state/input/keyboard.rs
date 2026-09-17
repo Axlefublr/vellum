@@ -19,6 +19,7 @@ struct KeyChord {
     text: String,
     modifiers: Modifiers,
     composed: bool,
+    logo: bool,
 }
 
 fn resolve_keybinding(chord: &KeyChord, editing_text: bool) -> Option<Action> {
@@ -174,6 +175,7 @@ impl KeyboardState {
         let keycode = (evdev_key + KEYCODE_OFFSET).into();
         let keysym = state.key_get_one_sym(keycode);
         let modifiers = self.modifiers();
+        let logo = state.mod_name_is_active(xkb::MOD_NAME_LOGO, xkb::STATE_MODS_EFFECTIVE);
         let mut composed = false;
         use xkb::keysyms as key;
         let text = match keysym.raw() {
@@ -228,6 +230,7 @@ impl KeyboardState {
             text,
             modifiers,
             composed,
+            logo,
         })
     }
 
@@ -368,6 +371,29 @@ impl Dispatch<WlKeyboard, ()> for State {
                 state.keyboard.sync_text_session(session);
                 let editing = state.draw.is_editing_text();
                 let chord = state.keyboard.chord(key, editing);
+                if !editing
+                    && chord.as_ref().is_some_and(|chord| {
+                        chord.text == " "
+                            && !chord.modifiers.ctrl
+                            && !chord.modifiers.alt
+                            && !chord.modifiers.shift
+                            && !chord.logo
+                    })
+                {
+                    state.keyboard.cancel_repeat();
+                    state.toggle_freeze();
+                    return;
+                }
+                if state.freeze.capturing() {
+                    state.keyboard.cancel_repeat();
+                    if chord
+                        .as_ref()
+                        .is_some_and(|chord| chord.key == xkb::keysyms::KEY_Escape)
+                    {
+                        state.apply_action(Action::Cancel);
+                    }
+                    return;
+                }
                 let composed_text = chord
                     .as_ref()
                     .filter(|chord| chord.composed && !chord.text.is_empty())

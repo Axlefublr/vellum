@@ -93,6 +93,7 @@ impl State {
             self.selected_output = Some(output);
         }
         self.input_output = Some(output);
+        self.freeze_output_selected();
         if self.draw.is_editing_text() {
             return;
         }
@@ -174,6 +175,9 @@ impl State {
     }
 
     pub(super) fn apply_action(&mut self, action: Action) {
+        if self.freeze.capturing() && !matches!(action, Action::Cancel | Action::Clear) {
+            return;
+        }
         self.flush_pen_motion();
         self.pointer.clear_released_pen_tip();
         let clear_on_escape = self.clear_on_escape && matches!(action, Action::Cancel);
@@ -182,6 +186,9 @@ impl State {
             .position()
             .map(|(x, y)| Point::new(x as f32, y as f32));
         let effect = self.draw.handle_action(action, anchor);
+        if self.freeze.capturing() {
+            self.stop_freeze(false);
+        }
         if effect.changed {
             self.request_render();
         }
@@ -267,6 +274,9 @@ impl State {
         modifiers: Modifiers,
         latch_picker: bool,
     ) -> Option<Point> {
+        if self.freeze.capturing() {
+            return None;
+        }
         self.flush_pen_motion();
         let point = Point::new(x as f32, y as f32);
         if self.draw.picker_active() {

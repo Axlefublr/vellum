@@ -36,6 +36,7 @@ struct FileConfig {
     palette: Option<Vec<String>>,
     feedback_duration_ms: Option<u64>,
     clear_on_escape: Option<bool>,
+    freeze_on_activate: Option<bool>,
     default_fill_shapes: Option<bool>,
     #[serde(default)]
     cursor: CursorVisibility,
@@ -339,6 +340,7 @@ pub(super) struct Settings {
     pub(super) palette: Vec<Rgba>,
     pub(super) feedback_duration: Duration,
     pub(super) clear_on_escape: bool,
+    pub(super) freeze_on_activate: bool,
     pub(super) default_fill_shapes: bool,
     pub(super) tool_defaults: ToolDefaults,
     pub(super) cursor: CursorVisibility,
@@ -436,6 +438,7 @@ impl Settings {
             palette,
             feedback_duration: Duration::from_millis(feedback_duration_ms),
             clear_on_escape: file.clear_on_escape.unwrap_or(false),
+            freeze_on_activate: file.freeze_on_activate.unwrap_or(false),
             default_fill_shapes: file.default_fill_shapes.unwrap_or(false),
             tool_defaults: file.tools,
             cursor: file.cursor,

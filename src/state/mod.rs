@@ -1,5 +1,6 @@
 //! Overlay lifecycle and application state.
 
+mod freeze;
 mod input;
 mod output;
 mod render;
@@ -23,6 +24,7 @@ pub(crate) struct State {
     input_output: Option<OutputId>,
     keyboard_output: Option<OutputId>,
     clear_on_escape: bool,
+    freeze: freeze::Freeze,
     pending_pen_motion: PendingPenMotion,
 
     wayland: WaylandState,
@@ -74,9 +76,13 @@ impl State {
             self.request_render();
         }
         self.refresh_cursor();
+        if self.freeze.on_activate {
+            self.start_freeze();
+        }
     }
 
     fn deactivate(&mut self) {
+        self.stop_freeze(true);
         self.flush_pen_motion();
         self.keyboard.cancel_repeat();
         self.pointer.cancel_gesture();
@@ -87,8 +93,15 @@ impl State {
         self.tablet.restore_cursors();
         self.active = false;
         self.selected_output = None;
+        // Replace frozen content before releasing input, without waiting on an
+        // older frame callback. A transient acquisition failure remains damaged
+        // and is retried by the normal render scheduler below.
+        let damaged: Vec<_> = self.draw.damaged_outputs().collect();
+        for output in damaged {
+            self.render(output);
+        }
         self.update_output_input();
-        if preview_changed {
+        if preview_changed || self.draw.damaged_outputs().next().is_some() {
             self.request_render();
         } else {
             for output in self.wayland.outputs.values_mut() {
@@ -113,13 +126,18 @@ impl State {
     }
 
     pub(crate) fn next_wakeup(&self) -> Option<std::time::Instant> {
-        [self.draw.next_wakeup(), self.keyboard.next_wakeup()]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.draw.next_wakeup(),
+            self.keyboard.next_wakeup(),
+            self.freeze.next_wakeup(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub(crate) fn handle_timeouts(&mut self, now: std::time::Instant) {
+        self.handle_freeze(now);
         if let Some(action) = self.keyboard.repeat_action(
             now,
             self.draw

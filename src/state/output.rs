@@ -19,6 +19,7 @@ use crate::render::{GpuContext, WgpuState};
 
 pub(super) struct Output {
     pub(super) output: WlOutput,
+    pub(super) name: String,
     pub(super) xdg_output: Option<ZxdgOutputV1>,
     pub(super) origin: Point,
     pub(super) logical_size: [u32; 2],
@@ -30,6 +31,7 @@ pub(super) struct Output {
     pub(super) layer_surface: ZwlrLayerSurfaceV1,
     pub(super) frame_pending: bool,
     pub(super) wgpu: Option<WgpuState>,
+    pub(super) transform: u32,
 }
 
 impl Output {
@@ -69,6 +71,7 @@ impl State {
         if self.wayland.outputs.contains_key(&id) {
             return;
         }
+        self.invalidate_freeze();
         let output =
             self.wayland
                 .registry
@@ -111,6 +114,7 @@ impl State {
             id,
             Output {
                 output,
+                name: String::new(),
                 xdg_output,
                 origin: Point::default(),
                 logical_size: [0; 2],
@@ -122,6 +126,7 @@ impl State {
                 layer_surface,
                 frame_pending: false,
                 wgpu: None,
+                transform: 0,
             },
         );
         self.draw.add_output(id);
@@ -143,6 +148,7 @@ impl State {
         let Some(mut output) = self.wayland.outputs.remove(&id) else {
             return;
         };
+        self.invalidate_freeze();
         output.wgpu.take();
         if let Some(scale) = output.fractional_scale {
             scale.destroy();
@@ -198,6 +204,7 @@ impl State {
             return;
         }
         output_state.origin = origin;
+        self.invalidate_freeze();
         self.draw.damage(output);
         self.request_render();
     }
@@ -232,10 +239,27 @@ impl Dispatch<WlOutput, OutputId> for State {
         _qhandle: &QueueHandle<Self>,
     ) {
         use wayland_client::protocol::wl_output::Event;
-        if let Event::Scale { factor } = event {
-            if let Some(output) = state.wayland.outputs.get_mut(output) {
-                output.integer_scale = factor.max(1);
+        let Some(output_state) = state.wayland.outputs.get_mut(output) else {
+            return;
+        };
+        let changed = match event {
+            Event::Name { ref name } => {
+                output_state.name.clone_from(name);
+                false
             }
+            Event::Geometry { transform, .. } => {
+                let transform = u32::from(transform);
+                std::mem::replace(&mut output_state.transform, transform) != transform
+            }
+            Event::Scale { factor } => {
+                std::mem::replace(&mut output_state.integer_scale, factor.max(1)) != factor.max(1)
+            }
+            _ => false,
+        };
+        if changed {
+            state.invalidate_freeze();
+        }
+        if let Event::Scale { .. } = event {
             state.resize_output(*output);
         }
         if let Event::Geometry { x, y, .. } = event
@@ -260,8 +284,9 @@ impl Dispatch<WpFractionalScaleV1, OutputId> for State {
         _qhandle: &QueueHandle<Self>,
     ) {
         if let wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            if let Some(output) = state.wayland.outputs.get_mut(output) {
-                output.preferred_scale = Some(scale.max(1));
+            let Some(output_state) = state.wayland.outputs.get_mut(output) else { return; };
+            if output_state.preferred_scale.replace(scale.max(1)) != Some(scale.max(1)) {
+                state.invalidate_freeze();
             }
             state.resize_output(*output);
         }
@@ -278,6 +303,11 @@ impl Dispatch<ZxdgOutputV1, OutputId> for State {
         _qhandle: &QueueHandle<Self>,
     ) {
         use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::Event;
+        if let Event::Name { ref name } = event
+            && let Some(output) = state.wayland.outputs.get_mut(output)
+        {
+            output.name.clone_from(name);
+        }
         if let Event::LogicalPosition { x, y } = event {
             state.set_output_origin(*output, Point::new(x as f32, y as f32));
         }
@@ -336,12 +366,20 @@ impl Dispatch<ZwlrLayerSurfaceV1, OutputId> for State {
                 height,
             } => {
                 layer_surface.ack_configure(serial);
-                let Some(output_state) = state.wayland.outputs.get_mut(output) else {
-                    return;
-                };
                 if width == 0 || height == 0 {
                     return;
                 }
+                if state
+                    .wayland
+                    .outputs
+                    .get(output)
+                    .is_some_and(|output| output.logical_size != [width, height])
+                {
+                    state.invalidate_freeze();
+                }
+                let Some(output_state) = state.wayland.outputs.get_mut(output) else {
+                    return;
+                };
                 output_state.logical_size = [width, height];
                 if output_state.wgpu.is_some() {
                     state.resize_output(*output);

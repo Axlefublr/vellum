@@ -6,6 +6,7 @@ clear_on_escape = false
 remember_last_tool = true
 default_color = "#E84046"
 feedback_duration_ms = 500
+freeze_on_activate = false
 default_fill_shapes = false
 size_range = { min = 1, max = 100 }
 stops = { size = [], opacity = [], roundness = [] }

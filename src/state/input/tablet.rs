@@ -273,7 +273,9 @@ impl Dispatch<ZwpTabletToolV2, (), State> for TabletState {
         _qhandle: &QueueHandle<State>,
     ) {
         use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_tool_v2::{Event, Type};
-        if !state.active && matches!(event, Event::Down { .. } | Event::Up | Event::Button { .. }) {
+        if (!state.active || state.freeze.capturing())
+            && matches!(event, Event::Down { .. } | Event::Up | Event::Button { .. })
+        {
             return;
         }
         let id = tablet_tool.clone();
@@ -324,7 +326,7 @@ impl Dispatch<ZwpTabletToolV2, (), State> for TabletState {
                 tool.current_cursor = None;
                 tool.output = None;
             }
-            if !state.active || output.is_none() {
+            if !state.active || state.freeze.capturing() || output.is_none() {
                 tool.pen_held = false;
                 tool.button_held = false;
                 tool.suppressed_gesture = false;
@@ -363,6 +365,14 @@ impl Dispatch<ZwpTabletToolV2, (), State> for TabletState {
                 tool.suppressed_gesture = !sequence.proximity_out && (pen_held || button_held);
                 return;
             }
+            if let Some(output) = output {
+                state.focus_output(output);
+            }
+            // Selecting the first output can start an activation-time capture.
+            if state.freeze.capturing() {
+                state.tablet.cancel_gesture();
+                return;
+            }
             if (pen_pressed || button_pressed) && pos.is_some() {
                 state.tablet.gesture_owner = Some(id.clone());
             }
@@ -370,9 +380,6 @@ impl Dispatch<ZwpTabletToolV2, (), State> for TabletState {
                 state.tablet.cursor_tool = Some(id.clone());
             } else if state.tablet.cursor_tool.as_ref() == Some(&id) {
                 state.tablet.cursor_tool = None;
-            }
-            if let Some(output) = output {
-                state.focus_output(output);
             }
             let modifiers = state.modifiers();
             if state.tablet.gesture_owner.as_ref() == Some(&id) {

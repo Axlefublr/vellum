@@ -22,7 +22,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLay
 
 use super::input::PendingPenMotion;
 use super::output::Output;
-use super::{State, input};
+use super::{State, freeze, input};
 use crate::OutputId;
 use crate::draw;
 
@@ -91,6 +91,7 @@ impl State {
         let output_globals = globals.contents().clone_list();
         let draw_on = settings.draw_on;
         let clear_on_escape = settings.clear_on_escape;
+        let freeze = freeze::Freeze::new(settings.freeze_on_activate);
 
         let mut state = Self {
             fatal_error: None,
@@ -100,6 +101,7 @@ impl State {
             input_output: None,
             keyboard_output: None,
             clear_on_escape,
+            freeze,
             pending_pen_motion: PendingPenMotion::default(),
             wayland: WaylandState {
                 _connection: connection,

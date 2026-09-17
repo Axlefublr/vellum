@@ -12,6 +12,10 @@ use kurbo::Affine;
 use picker::PickerState;
 use std::borrow::Cow;
 use text::TextState;
+use wgpu::util::DeviceExt;
+
+// Picker texture 0 and frozen background 1 share the same binding table.
+const FROZEN_TEXTURE: vello_hybrid::TextureId = vello_hybrid::TextureId(1);
 
 pub(crate) struct Viewport {
     pub origin: [f32; 2],
@@ -32,6 +36,7 @@ pub(crate) struct WgpuState {
     main_resources: vello_hybrid::Resources,
     main_scene: vello_hybrid::Scene,
     texture_bindings: vello_hybrid::TextureBindings,
+    frozen: Option<vello_hybrid::SampleRect>,
     picker: PickerState,
     text: TextState,
 }
@@ -97,9 +102,85 @@ impl WgpuState {
             main_resources,
             main_scene: vello_hybrid::Scene::new(1, 1),
             texture_bindings: vello_hybrid::TextureBindings::new(),
+            frozen: None,
             picker,
             text: TextState::default(),
         })
+    }
+
+    pub(crate) fn set_frozen_background(
+        &mut self,
+        size: [u32; 2],
+        rgba: &[u8],
+    ) -> Result<(), String> {
+        let checked = checked_target_size(&self.device, size, "screen capture")?;
+        let [width, height] = self.size();
+        let texture = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("frozen desktop"),
+                size: wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                // Vello samples external textures in the render target's color space.
+                format: if self.surface_config.format.is_srgb() {
+                    wgpu::TextureFormat::Rgba8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Rgba8Unorm
+                },
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            rgba,
+        );
+        self.texture_bindings
+            .insert(FROZEN_TEXTURE, texture.create_view(&Default::default()));
+        self.frozen = Some(vello_hybrid::SampleRect {
+            source_region: vello_common::geometry::RectU16::new(0, 0, checked[0], checked[1]),
+            transform: Affine::scale_non_uniform(
+                f64::from(width) / f64::from(size[0]),
+                f64::from(height) / f64::from(size[1]),
+            ),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn clear_frozen_background(&mut self) {
+        self.frozen = None;
+        self.texture_bindings.remove(FROZEN_TEXTURE);
+    }
+
+    pub(crate) fn is_frozen(&self) -> bool {
+        self.frozen.is_some()
+    }
+
+    pub(crate) fn hide_annotations(&self) -> Result<Option<wgpu::SurfaceTexture>, String> {
+        let Some(frame) = self.acquire_frame()? else {
+            return Ok(None);
+        };
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let view = frame.texture.create_view(&Default::default());
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("hide annotations for capture"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        self.queue.submit(Some(encoder.finish()));
+        Ok(Some(frame))
     }
 
     pub(crate) fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -116,19 +197,7 @@ impl WgpuState {
         Ok(())
     }
 
-    pub(crate) fn render(
-        &mut self,
-        items: &[SceneItem<'_>],
-        previews: &[Geometry],
-        picker: Option<&LocalGeometry>,
-        viewport: Viewport,
-        active_text: Option<(u64, &parley::Layout<()>)>,
-        before_present: impl FnOnce(),
-    ) -> Result<bool, String> {
-        let Viewport {
-            origin: viewport_origin,
-            scale,
-        } = viewport;
+    fn acquire_frame(&self) -> Result<Option<wgpu::SurfaceTexture>, String> {
         let mut status = self.surface.get_current_texture();
         if matches!(
             status,
@@ -143,15 +212,43 @@ impl WgpuState {
             wgpu::CurrentSurfaceTexture::Timeout
             | wgpu::CurrentSurfaceTexture::Occluded
             | wgpu::CurrentSurfaceTexture::Outdated
-            | wgpu::CurrentSurfaceTexture::Lost => return Ok(false),
+            | wgpu::CurrentSurfaceTexture::Lost => return Ok(None),
             wgpu::CurrentSurfaceTexture::Validation => {
                 return Err("surface acquisition validation error".into());
             }
         };
 
+        Ok(Some(output))
+    }
+
+    pub(crate) fn render(
+        &mut self,
+        items: &[SceneItem<'_>],
+        previews: &[Geometry],
+        picker: Option<&LocalGeometry>,
+        viewport: Viewport,
+        active_text: Option<(u64, &parley::Layout<()>)>,
+        before_present: impl FnOnce(),
+    ) -> Result<bool, String> {
+        let Viewport {
+            origin: viewport_origin,
+            scale,
+        } = viewport;
+        let Some(output) = self.acquire_frame()? else {
+            return Ok(false);
+        };
+
         // Creation and resize validate these dimensions.
         let main_size = self.size().map(|dimension| dimension as u16);
         self.main_scene.reset_and_resize(main_size[0], main_size[1]);
+        if let Some(background) = &self.frozen {
+            self.main_scene.set_transform(Affine::IDENTITY);
+            self.main_scene.draw_texture_rects(
+                FROZEN_TEXTURE,
+                peniko::ImageQuality::Medium,
+                [*background],
+            );
+        }
         let scene_transform = Affine::scale_non_uniform(scale[0], scale[1])
             * Affine::translate((
                 -f64::from(viewport_origin[0]),

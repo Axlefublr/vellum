@@ -320,7 +320,7 @@ impl Dispatch<WlPointer, (), State> for PointerState {
         _qhandle: &QueueHandle<State>,
     ) {
         use wayland_client::protocol::wl_pointer::Event;
-        if !state.active
+        if (!state.active || state.freeze.capturing())
             && !matches!(
                 event,
                 Event::Enter { .. } | Event::Leave { .. } | Event::Motion { .. } | Event::Frame
@@ -350,7 +350,7 @@ impl Dispatch<WlPointer, (), State> for PointerState {
             if sequence.motion.is_some() || sequence.pressed & (LEFT | RIGHT | MIDDLE) != 0 {
                 state.pointer.released_pen_tip = None;
             }
-            if !state.active || state.pointer.output.is_none() {
+            if !state.active || state.freeze.capturing() || state.pointer.output.is_none() {
                 state.interrupt_pointer_gesture();
                 if state.pointer.output.is_none()
                     || (sequence.left_surface && sequence.enter_serial.is_none())
@@ -371,6 +371,13 @@ impl Dispatch<WlPointer, (), State> for PointerState {
             }
             if let Some(output) = state.pointer.output {
                 state.focus_output(output);
+            }
+            if state.freeze.capturing() {
+                state.pointer.cancel_gesture();
+                if sequence.left_surface && sequence.enter_serial.is_none() {
+                    state.pointer.clear_focus();
+                }
+                return;
             }
             let left_pressed = sequence.pressed(LEFT);
             let left_released = sequence.released(LEFT);

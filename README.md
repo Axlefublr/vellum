@@ -142,6 +142,7 @@ Mod+A { spawn "vellum" "toggle"; }
 | <kbd>Shift</kbd> while drawing | Constrain the shape |
 | <kbd>Alt</kbd> while drawing | Draw triangles, rectangles, and ellipses from their center |
 | <kbd>F</kbd> | Toggle shape fill or text background |
+| <kbd>Space</kbd> | Freeze or resume the desktop background |
 | <kbd>Ctrl</kbd> + scroll | Change opacity |
 | <kbd>Shift</kbd> + scroll | Change roundness |
 | Drag a selection handle | Reshape the selection or stretch text |
@@ -182,6 +183,7 @@ Vellum looks for `vellum/config.toml` in `$XDG_CONFIG_HOME` (default `~/.config`
 | `palette` | array of strings | Between 2 and 12 [CSS colors](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Values/color_value#syntax) |
 | `feedback_duration_ms` | integer | How long property feedback remains visible, from `0` to `60000` milliseconds |
 | `clear_on_escape` | boolean | Clear annotations when Escape deactivates drawing mode |
+| `freeze_on_activate` | boolean | Capture a fresh frozen background each time drawing mode is activated |
 | `default_fill_shapes` | boolean | Initially fill triangles, rectangles, and ellipses |
 | `cursor` | table | Optional `visible` cursor override for all tools |
 
