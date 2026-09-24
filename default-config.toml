@@ -26,7 +26,7 @@ line = { opacity = 1, roundness = 0.5 }
 arrow = { opacity = 1, roundness = 0.25 }
 ellipse = { opacity = 1, filled = false }
 triangle = { opacity = 1, roundness = 0.0, filled = false }
-rectangle = { opacity = 1, roundness = 0.01, filled = false }
+rectangle = { opacity = 1, roundness = 0.1, filled = false }
 
 [tools.text]
 size = 16

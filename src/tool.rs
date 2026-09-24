@@ -69,7 +69,7 @@ impl Tool {
             Self::Pen => 1.0,
             Self::Line => 0.5,
             Self::Arrow => 0.25,
-            Self::Rectangle => 0.01,
+            Self::Rectangle => 0.1,
             Self::Text => 0.1,
             _ => 0.0,
         }

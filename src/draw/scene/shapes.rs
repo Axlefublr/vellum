@@ -230,12 +230,9 @@ fn rectangle_geometry(min: Point, max: Point, style: Style) -> Geometry {
     use kurbo::Shape;
 
     let half = style.size * 0.5;
-    let maximum = (max.x - min.x).abs().min((max.y - min.y).abs()) * 0.5;
-    let outer_radius = if style.roundness <= f32::EPSILON {
-        0.0
-    } else {
-        half + maximum * style.roundness
-    };
+    let maximum = (max.x - min.x).abs().min((max.y - min.y).abs()) * 0.5 + half;
+    let outer_radius = (100.0 * style.roundness.clamp(0.0, 1.0)).min(maximum);
+    let inner_radius = (outer_radius - style.size).max(0.0);
     let contours = [
         (
             Point::new(min.x - half, min.y - half),
@@ -245,7 +242,7 @@ fn rectangle_geometry(min: Point, max: Point, style: Style) -> Geometry {
         (
             Point::new(min.x + half, min.y + half),
             Point::new(max.x - half, max.y - half),
-            (maximum - half).max(0.0) * style.roundness,
+            inner_radius,
         ),
     ];
     let mut path = kurbo::BezPath::new();
