@@ -151,11 +151,11 @@ While editing text:
 
 | Input | Action |
 | --- | --- |
-| Arrow keys | Move the caret; <kbd>Ctrl+Left/Right</kbd> moves by word |
-| <kbd>Home</kbd> / <kbd>End</kbd> | Move to the line's start / end; add <kbd>Ctrl</kbd> for the whole annotation |
+| Arrow keys | Move the caret. <kbd>Ctrl+Left/Right</kbd> moves by word |
+| <kbd>Home</kbd> / <kbd>End</kbd> | Move to the line's start / end. Add <kbd>Ctrl</kbd> for the whole annotation |
 | <kbd>Shift</kbd> + navigation key | Extend the text selection |
 | <kbd>Ctrl+A</kbd> | Select all text in the annotation |
-| Click / drag | Position the caret / select text; <kbd>Shift</kbd> + click extends the selection |
+| Click / drag | Position the caret / select text. <kbd>Shift</kbd> + click extends the selection |
 | Double-click / triple-click | Select a word / line |
 | Typing, <kbd>Backspace</kbd>, or <kbd>Delete</kbd> | Replace or delete selected text |
 | <kbd>Shift+Enter</kbd> | Insert a newline |
@@ -175,7 +175,8 @@ Vellum looks for `vellum/config.toml` in `$XDG_CONFIG_HOME` (default `~/.config`
 | `default_tool` | string | Startup tool: `pen`, `line`, `arrow`, `triangle`, `rectangle`, `ellipse`, `text`, `eraser`, or `select` |
 | `remember_last_tool` | boolean | Keep the selected tool when drawing mode is reopened |
 | `stroke_size` | number | Initial size shared by pen, line, arrow, and shape tools |
-| `size_range` | table | Optional `min`, `max`, `step`, and `stops` for scrolling through sizes and pausing at each stop |
+| `size_range` | table | Optional `min`, `max`, and `step` for scrolling through sizes |
+| `stops` | table | Optional `size`, `opacity`, and `roundness` scroll stops |
 | `default_color` | string | Initial [CSS color](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Values/color_value#syntax). It must be present in `palette` |
 | `palette` | array of strings | Between 2 and 12 [CSS colors](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Values/color_value#syntax) |
 | `feedback_duration_ms` | integer | How long property feedback remains visible, from `0` to `60000` milliseconds |
@@ -189,7 +190,8 @@ Set these properties under `[tools.<tool>]`.
 | Property | Type | Supported tools | Description |
 | --- | --- | --- | --- |
 | `size` | number | All except `select` | Initial logical-pixel size. Pen, line, arrow, and shapes inherit `stroke_size` |
-| `size_range` | table | All except `select` | Overrides the matching global fields. `stops = []` removes inherited stops |
+| `size_range` | table | All except `select` | Overrides the matching global fields |
+| `stops` | table | See `size`, `opacity`, and `roundness` | Overrides each matching global list. `[]` clears it |
 | `opacity` | number | All except `eraser` and `select` | Initial opacity from `0.05` to `1.0`. Overrides `default_color` alpha |
 | `roundness` | number | `pen`, `line`, `arrow`, `triangle`, `rectangle`, `text` | Initial roundness from `0.0` to `1.0` |
 | `filled` | boolean | `triangle`, `rectangle`, `ellipse` | Initial fill state |

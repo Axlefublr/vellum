@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use super::ToolDefaults;
 use crate::tool::Tool;
@@ -13,7 +12,6 @@ pub(crate) struct SizeRange {
     min: f32,
     max: f32,
     step: f32,
-    stops: Arc<[f32]>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -22,25 +20,14 @@ pub(super) struct SizeRangeConfig {
     min: Option<f32>,
     max: Option<f32>,
     step: Option<f32>,
-    stops: Option<Vec<f32>>,
 }
 
 impl SizeRangeConfig {
     pub(super) fn resolve(&self, fallback: &SizeRange) -> SizeRange {
-        let stops = self.stops.as_ref().map_or_else(
-            || fallback.stops.clone(),
-            |stops| {
-                let mut stops = stops.clone();
-                stops.sort_by(f32::total_cmp);
-                stops.dedup();
-                Arc::from(stops)
-            },
-        );
         SizeRange {
             min: self.min.unwrap_or(fallback.min),
             max: self.max.unwrap_or(fallback.max),
             step: self.step.unwrap_or(fallback.step),
-            stops,
         }
     }
 }
@@ -51,7 +38,6 @@ impl Default for SizeRange {
             min: 1.0,
             max: 100.0,
             step: 1.0,
-            stops: Arc::from([]),
         }
     }
 }
@@ -68,12 +54,6 @@ impl SizeRange {
         }
         if !self.step.is_finite() || self.step <= 0.0 {
             return Err(format!("{name}.step must be greater than 0"));
-        }
-        if self.stops.iter().any(|stop| !self.contains(*stop)) {
-            return Err(format!(
-                "{name}.stops values must be between {} and {}",
-                self.min, self.max,
-            ));
         }
         Ok(self)
     }
@@ -97,10 +77,6 @@ impl SizeRange {
     pub(crate) fn step(&self) -> f32 {
         self.step
     }
-
-    pub(crate) fn stops(&self) -> &[f32] {
-        &self.stops
-    }
 }
 
 pub(super) fn resolve_size_ranges(
@@ -123,13 +99,6 @@ pub(super) fn resolve_size_ranges(
                 if global.step.is_none() {
                     fallback.step = DEFAULT_TEXT_STEP;
                 }
-                let stops = fallback
-                    .stops
-                    .iter()
-                    .copied()
-                    .filter(|stop| fallback.contains(*stop))
-                    .collect::<Vec<_>>();
-                fallback.stops = Arc::from(stops);
             }
             let range = tools
                 .get(&tool)

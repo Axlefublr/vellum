@@ -55,6 +55,7 @@ pub(super) struct Editor {
     tool_properties: ToolPropertySet,
     default_tool_properties: ToolPropertySet,
     size_ranges: std::sync::Arc<std::collections::BTreeMap<Tool, crate::config::SizeRange>>,
+    stops: std::sync::Arc<std::collections::BTreeMap<Tool, crate::config::Stops>>,
     remember_last_tool: bool,
     palette: Vec<[f32; 4]>,
 }
@@ -101,6 +102,7 @@ impl Editor {
             tool_properties,
             default_tool_properties,
             size_ranges: settings.size_ranges,
+            stops: settings.stops,
             remember_last_tool: settings.remember_last_tool,
             palette: settings.palette,
         }

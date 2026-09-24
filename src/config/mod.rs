@@ -27,6 +27,8 @@ struct FileConfig {
     stroke_size: Option<f32>,
     #[serde(default)]
     size_range: SizeRangeConfig,
+    #[serde(default)]
+    stops: StopConfig,
     default_color: Option<String>,
     palette: Option<Vec<String>>,
     feedback_duration_ms: Option<u64>,
@@ -46,16 +48,128 @@ pub(crate) enum DrawOn {
 
 pub(crate) type ToolDefaults = BTreeMap<Tool, PropertyDefaults>;
 
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PropertyDefaults {
     pub(crate) size: Option<f32>,
     size_range: Option<SizeRangeConfig>,
+    #[serde(default)]
+    stops: StopConfig,
     pub(crate) opacity: Option<f32>,
     pub(crate) roundness: Option<f32>,
     pub(crate) filled: Option<bool>,
     pub(crate) background: Option<bool>,
     font: Option<FontConfig>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopConfig {
+    size: Option<Vec<f32>>,
+    opacity: Option<Vec<f32>>,
+    roundness: Option<Vec<f32>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Stops {
+    pub(crate) size: Arc<[f32]>,
+    pub(crate) opacity: Arc<[f32]>,
+    pub(crate) roundness: Arc<[f32]>,
+}
+
+fn size_stops(name: &str, values: &[f32], range: &SizeRange) -> Result<Arc<[f32]>, String> {
+    if values.iter().any(|value| !range.contains(*value)) {
+        return Err(format!(
+            "{name} values must be between {} and {}",
+            range.min(),
+            range.max(),
+        ));
+    }
+    let mut values = values.to_vec();
+    values.sort_by(f32::total_cmp);
+    values.dedup();
+    Ok(Arc::from(values))
+}
+
+fn percent_stops(name: &str, values: &[f32], min: f32) -> Result<Arc<[f32]>, String> {
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || !(min..=1.0).contains(value))
+    {
+        return Err(format!("{name} values must be between {min} and 1.0"));
+    }
+    let mut values = values.to_vec();
+    values.sort_by(f32::total_cmp);
+    values.dedup();
+    Ok(Arc::from(values))
+}
+
+fn resolve_stops(
+    tools: &ToolDefaults,
+    global: &StopConfig,
+    global_size_range: &SizeRange,
+    size_ranges: &BTreeMap<Tool, SizeRange>,
+) -> Result<BTreeMap<Tool, Stops>, String> {
+    let global_size = size_stops(
+        "stops.size",
+        global.size.as_deref().unwrap_or_default(),
+        global_size_range,
+    )?;
+    let global_opacity = percent_stops(
+        "stops.opacity",
+        global.opacity.as_deref().unwrap_or_default(),
+        0.05,
+    )?;
+    let global_roundness = percent_stops(
+        "stops.roundness",
+        global.roundness.as_deref().unwrap_or_default(),
+        0.0,
+    )?;
+    Tool::SIZED
+        .into_iter()
+        .map(|tool| {
+            let configured = tools.get(&tool).map(|defaults| &defaults.stops);
+            let range = size_ranges
+                .get(&tool)
+                .expect("adjustable tools have size ranges");
+            let size = match configured.and_then(|stops| stops.size.as_deref()) {
+                Some(values) => {
+                    size_stops(&format!("tools.{}.stops.size", tool.name()), values, range)?
+                }
+                None => Arc::from(
+                    global_size
+                        .iter()
+                        .copied()
+                        .filter(|stop| range.contains(*stop))
+                        .collect::<Vec<_>>(),
+                ),
+            };
+            let opacity = match configured.and_then(|stops| stops.opacity.as_deref()) {
+                Some(values) => percent_stops(
+                    &format!("tools.{}.stops.opacity", tool.name()),
+                    values,
+                    0.05,
+                )?,
+                None => global_opacity.clone(),
+            };
+            let roundness = match configured.and_then(|stops| stops.roundness.as_deref()) {
+                Some(values) => percent_stops(
+                    &format!("tools.{}.stops.roundness", tool.name()),
+                    values,
+                    0.0,
+                )?,
+                None => global_roundness.clone(),
+            };
+            Ok((
+                tool,
+                Stops {
+                    size,
+                    opacity,
+                    roundness,
+                },
+            ))
+        })
+        .collect()
 }
 
 fn validate_tool_defaults(
@@ -67,6 +181,9 @@ fn validate_tool_defaults(
         let supports_size = tool != Tool::Select;
         if defaults.size_range.is_some() && !supports_size {
             return Err(format!("{prefix}.size_range is not supported"));
+        }
+        if defaults.stops.size.is_some() && !supports_size {
+            return Err(format!("{prefix}.stops.size is not supported"));
         }
         match defaults.size {
             Some(_) if !supports_size => {
@@ -97,8 +214,14 @@ fn validate_tool_defaults(
             }
             _ => {}
         }
+        if defaults.stops.opacity.is_some() && matches!(tool, Tool::Eraser | Tool::Select) {
+            return Err(format!("{prefix}.stops.opacity is not supported"));
+        }
         if defaults.roundness.is_some() && tool.default_roundness().is_none() {
             return Err(format!("{prefix}.roundness is not supported"));
+        }
+        if defaults.stops.roundness.is_some() && tool.default_roundness().is_none() {
+            return Err(format!("{prefix}.stops.roundness is not supported"));
         }
         if let Some(value) = defaults.roundness
             && (!value.is_finite() || !(0.0..=1.0).contains(&value))
@@ -122,6 +245,7 @@ pub(super) struct Settings {
     pub(super) draw_on: DrawOn,
     pub(super) stroke_size: f32,
     pub(super) size_ranges: Arc<BTreeMap<Tool, SizeRange>>,
+    pub(super) stops: Arc<BTreeMap<Tool, Stops>>,
     pub(super) default_color: Rgba,
     pub(super) default_tool: Tool,
     pub(super) remember_last_tool: bool,
@@ -198,6 +322,12 @@ impl Settings {
             &file.size_range,
         )?);
         validate_tool_defaults(&file.tools, &size_ranges)?;
+        let stops = Arc::new(resolve_stops(
+            &file.tools,
+            &file.stops,
+            &size_range,
+            &size_ranges,
+        )?);
         let text_font = file
             .tools
             .get(&Tool::Text)
@@ -209,6 +339,7 @@ impl Settings {
             draw_on: file.draw_on.unwrap_or_default(),
             stroke_size,
             size_ranges,
+            stops,
             default_color,
             default_tool,
             remember_last_tool: file.remember_last_tool.unwrap_or(true),
