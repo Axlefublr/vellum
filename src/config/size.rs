@@ -5,13 +5,11 @@ use crate::tool::Tool;
 
 const DEFAULT_TEXT_MIN_SIZE: f32 = 8.0;
 const DEFAULT_TEXT_MAX_SIZE: f32 = 500.0;
-const DEFAULT_TEXT_STEP: f32 = 0.5;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct SizeRange {
     min: f32,
     max: f32,
-    step: f32,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -19,7 +17,6 @@ pub(crate) struct SizeRange {
 pub(super) struct SizeRangeConfig {
     min: Option<f32>,
     max: Option<f32>,
-    step: Option<f32>,
 }
 
 impl SizeRangeConfig {
@@ -27,7 +24,6 @@ impl SizeRangeConfig {
         SizeRange {
             min: self.min.unwrap_or(fallback.min),
             max: self.max.unwrap_or(fallback.max),
-            step: self.step.unwrap_or(fallback.step),
         }
     }
 }
@@ -37,7 +33,6 @@ impl Default for SizeRange {
         Self {
             min: 1.0,
             max: 100.0,
-            step: 1.0,
         }
     }
 }
@@ -51,9 +46,6 @@ impl SizeRange {
             return Err(format!(
                 "{name}.max must be greater than or equal to {name}.min"
             ));
-        }
-        if !self.step.is_finite() || self.step <= 0.0 {
-            return Err(format!("{name}.step must be greater than 0"));
         }
         Ok(self)
     }
@@ -73,10 +65,6 @@ impl SizeRange {
     pub(crate) fn max(&self) -> f32 {
         self.max
     }
-
-    pub(crate) fn step(&self) -> f32 {
-        self.step
-    }
 }
 
 pub(super) fn resolve_size_ranges(
@@ -88,7 +76,7 @@ pub(super) fn resolve_size_ranges(
         .into_iter()
         .map(|tool| {
             let name = format!("tools.{}.size_range", tool.name());
-            let mut fallback = fallback.clone();
+            let mut fallback = *fallback;
             if tool == Tool::Text {
                 if global.min.is_none() {
                     fallback.min = DEFAULT_TEXT_MIN_SIZE;
@@ -96,14 +84,11 @@ pub(super) fn resolve_size_ranges(
                 if global.max.is_none() {
                     fallback.max = DEFAULT_TEXT_MAX_SIZE;
                 }
-                if global.step.is_none() {
-                    fallback.step = DEFAULT_TEXT_STEP;
-                }
             }
             let range = tools
                 .get(&tool)
                 .and_then(|defaults| defaults.size_range.as_ref())
-                .map_or_else(|| fallback.clone(), |range| range.resolve(&fallback))
+                .map_or(fallback, |range| range.resolve(&fallback))
                 .validate(&name)?;
             Ok((tool, range))
         })

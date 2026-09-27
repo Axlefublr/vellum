@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const CONFIG_FILE: &str = "vellum/config.toml";
+const DEFAULT_TEXT_SIZE_STEP: f32 = 0.5;
 const DEFAULT_PALETTE: [&str; 8] = [
     "#E84046", "#EF8F4F", "#EED14D", "#4DD54F", "#0483FA", "#7C58EA", "#EBEBEB", "#141414",
 ];
@@ -27,6 +28,8 @@ struct FileConfig {
     stroke_size: Option<f32>,
     #[serde(default)]
     size_range: SizeRangeConfig,
+    #[serde(default)]
+    steps: StepConfig,
     #[serde(default)]
     stops: StopConfig,
     default_color: Option<String>,
@@ -54,12 +57,76 @@ pub(crate) struct PropertyDefaults {
     pub(crate) size: Option<f32>,
     size_range: Option<SizeRangeConfig>,
     #[serde(default)]
+    steps: StepConfig,
+    #[serde(default)]
     stops: StopConfig,
     pub(crate) opacity: Option<f32>,
     pub(crate) roundness: Option<f32>,
     pub(crate) filled: Option<bool>,
     pub(crate) background: Option<bool>,
     font: Option<FontConfig>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StepConfig {
+    size: Option<f32>,
+    opacity: Option<f32>,
+    roundness: Option<f32>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Steps {
+    pub(crate) size: f32,
+    pub(crate) opacity: f32,
+    pub(crate) roundness: f32,
+}
+
+fn valid_step(name: &str, value: f32) -> Result<f32, String> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("{name} must be greater than 0"));
+    }
+    Ok(value)
+}
+
+fn resolve_steps(
+    tools: &ToolDefaults,
+    global: &StepConfig,
+) -> Result<BTreeMap<Tool, Steps>, String> {
+    let global_steps = Steps {
+        size: valid_step("steps.size", global.size.unwrap_or(1.0))?,
+        opacity: valid_step("steps.opacity", global.opacity.unwrap_or(0.01))?,
+        roundness: valid_step("steps.roundness", global.roundness.unwrap_or(0.01))?,
+    };
+    Tool::SIZED
+        .into_iter()
+        .map(|tool| {
+            let configured = tools.get(&tool).map(|defaults| &defaults.steps);
+            let size = match configured.and_then(|steps| steps.size) {
+                Some(value) => valid_step(&format!("tools.{}.steps.size", tool.name()), value)?,
+                None if tool == Tool::Text && global.size.is_none() => DEFAULT_TEXT_SIZE_STEP,
+                None => global_steps.size,
+            };
+            let opacity = match configured.and_then(|steps| steps.opacity) {
+                Some(value) => valid_step(&format!("tools.{}.steps.opacity", tool.name()), value)?,
+                None => global_steps.opacity,
+            };
+            let roundness = match configured.and_then(|steps| steps.roundness) {
+                Some(value) => {
+                    valid_step(&format!("tools.{}.steps.roundness", tool.name()), value)?
+                }
+                None => global_steps.roundness,
+            };
+            Ok((
+                tool,
+                Steps {
+                    size,
+                    opacity,
+                    roundness,
+                },
+            ))
+        })
+        .collect()
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -182,6 +249,9 @@ fn validate_tool_defaults(
         if defaults.size_range.is_some() && !supports_size {
             return Err(format!("{prefix}.size_range is not supported"));
         }
+        if defaults.steps.size.is_some() && !supports_size {
+            return Err(format!("{prefix}.steps.size is not supported"));
+        }
         if defaults.stops.size.is_some() && !supports_size {
             return Err(format!("{prefix}.stops.size is not supported"));
         }
@@ -217,11 +287,17 @@ fn validate_tool_defaults(
         if defaults.stops.opacity.is_some() && matches!(tool, Tool::Eraser | Tool::Select) {
             return Err(format!("{prefix}.stops.opacity is not supported"));
         }
+        if defaults.steps.opacity.is_some() && matches!(tool, Tool::Eraser | Tool::Select) {
+            return Err(format!("{prefix}.steps.opacity is not supported"));
+        }
         if defaults.roundness.is_some() && tool.default_roundness().is_none() {
             return Err(format!("{prefix}.roundness is not supported"));
         }
         if defaults.stops.roundness.is_some() && tool.default_roundness().is_none() {
             return Err(format!("{prefix}.stops.roundness is not supported"));
+        }
+        if defaults.steps.roundness.is_some() && tool.default_roundness().is_none() {
+            return Err(format!("{prefix}.steps.roundness is not supported"));
         }
         if let Some(value) = defaults.roundness
             && (!value.is_finite() || !(0.0..=1.0).contains(&value))
@@ -245,6 +321,7 @@ pub(super) struct Settings {
     pub(super) draw_on: DrawOn,
     pub(super) stroke_size: f32,
     pub(super) size_ranges: Arc<BTreeMap<Tool, SizeRange>>,
+    pub(super) steps: Arc<BTreeMap<Tool, Steps>>,
     pub(super) stops: Arc<BTreeMap<Tool, Stops>>,
     pub(super) default_color: Rgba,
     pub(super) default_tool: Tool,
@@ -322,6 +399,7 @@ impl Settings {
             &file.size_range,
         )?);
         validate_tool_defaults(&file.tools, &size_ranges)?;
+        let steps = Arc::new(resolve_steps(&file.tools, &file.steps)?);
         let stops = Arc::new(resolve_stops(
             &file.tools,
             &file.stops,
@@ -339,6 +417,7 @@ impl Settings {
             draw_on: file.draw_on.unwrap_or_default(),
             stroke_size,
             size_ranges,
+            steps,
             stops,
             default_color,
             default_tool,
