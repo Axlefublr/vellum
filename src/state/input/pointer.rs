@@ -12,7 +12,7 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
 
 use super::short_click;
 use crate::OutputId;
-use crate::draw::{Action, Cursor, CursorHint, Modifiers, ToolOverride};
+use crate::draw::{Action, Cursor, CursorHint, Modifiers, Point, ToolOverride};
 use crate::state::State;
 
 const EVDEV_LEFT: u32 = 272;
@@ -43,6 +43,7 @@ pub(in crate::state) struct PointerState {
     current_cursor: Option<Cursor>,
     output: Option<OutputId>,
     position: Option<(f64, f64)>,
+    released_pen_tip: Option<Point>,
     left_button_held: bool,
     right_button_held: bool,
     middle_button_held: bool,
@@ -68,6 +69,14 @@ impl PointerState {
 
     pub(in crate::state) fn position(&self) -> Option<(f64, f64)> {
         self.position
+    }
+
+    pub(in crate::state) fn released_pen_tip(&self) -> Option<Point> {
+        self.released_pen_tip
+    }
+
+    pub(in crate::state) fn clear_released_pen_tip(&mut self) {
+        self.released_pen_tip = None;
     }
 
     pub(in crate::state) fn tool_override(&self) -> ToolOverride {
@@ -126,10 +135,12 @@ impl PointerState {
     fn clear_focus(&mut self) {
         self.output = None;
         self.position = None;
+        self.released_pen_tip = None;
         self.cursor_serial = None;
     }
 
     pub(in crate::state) fn cancel_gesture(&mut self) {
+        self.released_pen_tip = None;
         self.event_sequence = EventSequence {
             motion: self.event_sequence.motion,
             enter_serial: self.event_sequence.enter_serial,
@@ -336,6 +347,9 @@ impl Dispatch<WlPointer, (), State> for PointerState {
             .dispatch(event, (f64::from(origin.x), f64::from(origin.y)))
         {
             state.pointer.update_state(sequence);
+            if sequence.motion.is_some() || sequence.pressed & (LEFT | RIGHT | MIDDLE) != 0 {
+                state.pointer.released_pen_tip = None;
+            }
             if !state.active || state.pointer.output.is_none() {
                 state.pointer.cancel_gesture();
                 if state.pointer.output.is_none()
@@ -437,7 +451,8 @@ impl Dispatch<WlPointer, (), State> for PointerState {
             if let Some(pos) = state.pointer.position {
                 if left_released {
                     if !state.pointer.left_button_in_picker || state.draw.picker_active() {
-                        state.pointer_up(pos, modifiers, false);
+                        let pen_tip = state.pointer_up(pos, modifiers, false);
+                        state.pointer.released_pen_tip = pen_tip;
                     }
                     state.pointer.left_button_in_picker = false;
                     state.pointer.left_press_pos = None;

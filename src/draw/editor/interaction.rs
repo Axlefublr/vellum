@@ -262,6 +262,17 @@ impl Editor {
         stroke.push_motion(motion, modifiers.shift)
     }
 
+    pub(in crate::draw) fn pen_release_tip(
+        &self,
+        point: Point,
+        modifiers: Modifiers,
+    ) -> Option<Point> {
+        let Some(Interaction::Freehand(stroke)) = &self.interaction else {
+            return None;
+        };
+        Some(stroke.release_tip(point, modifiers.shift))
+    }
+
     pub(in crate::draw) fn pointer_up(&mut self, point: Point, modifiers: Modifiers) -> bool {
         if let Some(edit) = self.text_edit_mut() {
             return edit.end_drag(point);

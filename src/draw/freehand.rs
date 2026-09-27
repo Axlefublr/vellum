@@ -100,7 +100,15 @@ impl LiveStroke {
     }
 
     pub fn tail_geometry(&self) -> Geometry {
-        self.render_tail(false)
+        self.render_tail(true)
+    }
+
+    pub fn release_tip(&self, point: Point, snap: bool) -> Point {
+        if self.direction_locked {
+            *self.points.last().expect("freehand starts with one point")
+        } else {
+            self.oriented_point(point + self.alignment_offset, snap)
+        }
     }
 
     pub fn update_style(&mut self, style: Style) {
@@ -128,21 +136,8 @@ impl LiveStroke {
     }
 
     pub fn finish(mut self, point: Point, snap: bool) -> (Vec<Point>, Style, Geometry) {
-        let point = point + self.alignment_offset;
-        if self.direction_locked {
-            // Keep the endpoint shown by the stabilized live preview.
-            if let Some([x, y]) = self
-                .tail_centerline(self.points.len(), false)
-                .last()
-                .copied()
-            {
-                *self
-                    .points
-                    .last_mut()
-                    .expect("freehand starts with one point") = Point::new(x as f32, y as f32);
-            }
-        } else {
-            let point = self.oriented_point(point, snap);
+        if !self.direction_locked {
+            let point = self.oriented_point(point + self.alignment_offset, snap);
             if point != self.points[0] {
                 self.commit_direction(point);
             }

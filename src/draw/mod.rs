@@ -203,6 +203,10 @@ impl DrawState {
         self.record(changed)
     }
 
+    pub(crate) fn pen_release_tip(&self, point: Point, modifiers: Modifiers) -> Option<Point> {
+        self.editor.pen_release_tip(point, modifiers)
+    }
+
     pub(crate) fn modifiers_changed(&mut self, modifiers: Modifiers) -> bool {
         let changed = self.editor.modifiers_changed(modifiers);
         self.record(changed)

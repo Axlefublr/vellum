@@ -25,6 +25,7 @@ use super::State;
 use crate::OutputId;
 use crate::config::DrawOn;
 use crate::draw::{self, Action, Cursor, Modifiers, Point};
+use crate::tool::Tool;
 
 const MAX_PENDING_PEN_SAMPLES: usize = 64;
 const PEN_BEND_DEVIATION_SQUARED: f32 = 0.5 * 0.5;
@@ -152,6 +153,7 @@ impl State {
 
     pub(super) fn apply_action(&mut self, action: Action) {
         self.flush_pen_motion();
+        self.pointer.clear_released_pen_tip();
         let clear_on_escape = self.clear_on_escape && matches!(action, Action::Cancel);
         let anchor = self
             .pointer
@@ -242,7 +244,7 @@ impl State {
         (x, y): (f64, f64),
         modifiers: Modifiers,
         latch_picker: bool,
-    ) {
+    ) -> Option<Point> {
         self.flush_pen_motion();
         let point = Point::new(x as f32, y as f32);
         if self.draw.picker_active() {
@@ -250,12 +252,14 @@ impl State {
                 self.request_render();
                 self.restore_keyboard_focus();
             }
-            return;
+            return None;
         }
+        let pen_tip = self.draw.pen_release_tip(point, modifiers);
         if self.draw.pointer_up(point, modifiers) {
             self.request_render();
         }
         self.pending_pen_motion.reset(None);
+        pen_tip
     }
 
     pub(super) fn open_picker(&mut self, (x, y): (f64, f64)) {
@@ -319,7 +323,14 @@ impl State {
         let point = Point::new(x as f32, y as f32);
         let cursor = self.draw.cursor(point, self.pointer.tool_override());
         let preview_changed = self.draw.set_tool_cursor(match cursor {
-            Cursor::Tool(preview) if self.pointer.tool_cursor_supported() => Some((point, preview)),
+            Cursor::Tool(preview) if self.pointer.tool_cursor_supported() => {
+                let point = if preview.tool == Tool::Pen {
+                    self.pointer.released_pen_tip().unwrap_or(point)
+                } else {
+                    point
+                };
+                Some((point, preview))
+            }
             _ => None,
         });
         self.pointer.refresh_cursor(pointer, cursor);
