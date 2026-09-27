@@ -38,6 +38,8 @@ struct FileConfig {
     clear_on_escape: Option<bool>,
     default_fill_shapes: Option<bool>,
     #[serde(default)]
+    cursor: CursorVisibility,
+    #[serde(default)]
     tools: ToolDefaults,
 }
 
@@ -65,6 +67,14 @@ pub(crate) struct PropertyDefaults {
     pub(crate) filled: Option<bool>,
     pub(crate) background: Option<bool>,
     font: Option<FontConfig>,
+    #[serde(default)]
+    pub(crate) cursor: CursorVisibility,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CursorVisibility {
+    pub(crate) visible: Option<bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -331,6 +341,7 @@ pub(super) struct Settings {
     pub(super) clear_on_escape: bool,
     pub(super) default_fill_shapes: bool,
     pub(super) tool_defaults: ToolDefaults,
+    pub(super) cursor: CursorVisibility,
     pub(super) text_font: crate::text::TextFont,
 }
 
@@ -427,6 +438,7 @@ impl Settings {
             clear_on_escape: file.clear_on_escape.unwrap_or(false),
             default_fill_shapes: file.default_fill_shapes.unwrap_or(false),
             tool_defaults: file.tools,
+            cursor: file.cursor,
             text_font,
         })
     }

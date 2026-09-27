@@ -70,9 +70,21 @@ pub(crate) enum Cursor {
 
 impl Cursor {
     pub(crate) fn same_compositor_cursor(self, other: Self) -> bool {
-        self == other
-            || matches!(self, Self::Hidden | Self::Tool(_))
-                && matches!(other, Self::Hidden | Self::Tool(_))
+        self.shape() == other.shape()
+    }
+
+    pub(crate) fn shape(self) -> Option<CursorHint> {
+        match self {
+            Self::Shape(hint) => Some(hint),
+            Self::Hidden | Self::Tool(_) => None,
+        }
+    }
+
+    pub(crate) fn tool(self) -> Option<ToolCursor> {
+        match self {
+            Self::Tool(preview) => Some(preview),
+            Self::Hidden | Self::Shape(_) => None,
+        }
     }
 }
 
@@ -226,6 +238,18 @@ impl DrawState {
 
     pub(crate) fn cursor(&self, point: Point, tool_override: ToolOverride) -> Cursor {
         self.editor.cursor(point, tool_override)
+    }
+
+    pub(crate) fn finish_pointer_interaction(
+        &mut self,
+        point: Option<Point>,
+        modifiers: Modifiers,
+    ) -> bool {
+        let changed = self.editor.finish_pointer_interaction(point, modifiers);
+        if changed {
+            self.show_caret();
+        }
+        self.record(changed)
     }
 
     pub(crate) fn set_tool_cursor(&mut self, cursor: Option<(Point, ToolCursor)>) -> bool {

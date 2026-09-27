@@ -59,6 +59,8 @@ pub(super) struct Editor {
     stops: std::sync::Arc<std::collections::BTreeMap<Tool, crate::config::Stops>>,
     remember_last_tool: bool,
     palette: Vec<[f32; 4]>,
+    cursor_visibility: Option<bool>,
+    tool_cursor_visibility: std::collections::BTreeMap<Tool, bool>,
 }
 
 impl Editor {
@@ -107,6 +109,14 @@ impl Editor {
             stops: settings.stops,
             remember_last_tool: settings.remember_last_tool,
             palette: settings.palette,
+            cursor_visibility: settings.cursor.visible,
+            tool_cursor_visibility: settings
+                .tool_defaults
+                .into_iter()
+                .filter_map(|(tool, defaults)| {
+                    defaults.cursor.visible.map(|visible| (tool, visible))
+                })
+                .collect(),
         }
     }
 

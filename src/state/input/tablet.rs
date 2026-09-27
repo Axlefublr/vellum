@@ -109,8 +109,8 @@ impl TabletState {
         let tool_override =
             ToolOverride::from_eraser(tool.eraser || (tool.button_held && tool.pen_held));
         let cursor = draw.cursor(point, tool_override);
-        let changed = draw.set_tool_cursor(match cursor {
-            Cursor::Tool(preview) if tool.cursor_shape_device.is_some() => Some((point, preview)),
+        let changed = draw.set_tool_cursor(match cursor.tool() {
+            Some(preview) if tool.cursor_shape_device.is_some() => Some((point, preview)),
             _ => None,
         });
         tool.refresh_cursor(&tablet_tool, cursor);

@@ -351,7 +351,7 @@ impl Dispatch<WlPointer, (), State> for PointerState {
                 state.pointer.released_pen_tip = None;
             }
             if !state.active || state.pointer.output.is_none() {
-                state.pointer.cancel_gesture();
+                state.interrupt_pointer_gesture();
                 if state.pointer.output.is_none()
                     || (sequence.left_surface && sequence.enter_serial.is_none())
                 {
@@ -487,6 +487,7 @@ impl Dispatch<WlPointer, (), State> for PointerState {
                 }
             }
             if sequence.left_surface && sequence.enter_serial.is_none() {
+                state.interrupt_pointer_gesture();
                 state.pointer.clear_focus();
             }
             state.refresh_cursor();
@@ -510,9 +511,9 @@ pub(super) fn update_cursor(
     if current.is_some_and(|current| current.same_compositor_cursor(cursor)) {
         return;
     }
-    match cursor {
-        Cursor::Shape(hint) => device.set_shape(serial, cursor_shape(hint)),
-        Cursor::Hidden | Cursor::Tool(_) => hide(serial),
+    match cursor.shape() {
+        Some(hint) => device.set_shape(serial, cursor_shape(hint)),
+        None => hide(serial),
     }
     *current = Some(cursor);
 }

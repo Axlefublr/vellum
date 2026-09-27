@@ -183,6 +183,7 @@ Vellum looks for `vellum/config.toml` in `$XDG_CONFIG_HOME` (default `~/.config`
 | `feedback_duration_ms` | integer | How long property feedback remains visible, from `0` to `60000` milliseconds |
 | `clear_on_escape` | boolean | Clear annotations when Escape deactivates drawing mode |
 | `default_fill_shapes` | boolean | Initially fill triangles, rectangles, and ellipses |
+| `cursor` | table | Optional `visible` cursor override for all tools |
 
 #### Per-tool
 
@@ -198,6 +199,7 @@ Set these properties under `[tools.<tool>]`.
 | `roundness` | number | `pen`, `line`, `arrow`, `triangle`, `rectangle`, `text` | Initial roundness from `0.0` to `1.0` |
 | `filled` | boolean | `triangle`, `rectangle`, `ellipse` | Initial fill state |
 | `background` | boolean | `text` | Whether text starts with an automatic black or white background |
+| `cursor` | table | All | Overrides the global `cursor.visible` setting for this tool |
 | `font.family` | string | `text` | Ordered [CSS font-family list](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/font-family#values) |
 | `font.weight` | number | `text` | [Weight](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/font-weight#common_weight_name_mapping) from `1` to `1000` |
 | `font.style` | string | `text` | Font style: `"normal"`, `"italic"`, or `"oblique"` |

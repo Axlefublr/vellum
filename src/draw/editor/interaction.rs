@@ -363,6 +363,43 @@ impl Editor {
 
     pub(in crate::draw) fn cursor(&self, point: Point, tool_override: ToolOverride) -> Cursor {
         let effective_tool = tool_override.effective_tool(self.tool);
+        let tool = if tool_override != ToolOverride::None && effective_tool == Tool::Eraser {
+            Tool::Eraser
+        } else {
+            match &self.interaction {
+                Some(Interaction::Freehand(_)) => Tool::Pen,
+                Some(Interaction::Drawing { tool, .. }) => *tool,
+                Some(Interaction::Moving { .. } | Interaction::Resizing { .. }) => Tool::Select,
+                Some(Interaction::EditingText(_)) => Tool::Text,
+                Some(Interaction::Erasing { .. }) => Tool::Eraser,
+                None => effective_tool,
+            }
+        };
+        let cursor = self.default_cursor(point, tool_override);
+        let visible = self
+            .tool_cursor_visibility
+            .get(&tool)
+            .copied()
+            .or(self.cursor_visibility)
+            .unwrap_or(!matches!(tool, Tool::Pen | Tool::Arrow | Tool::Eraser));
+        if !visible
+            && matches!(
+                self.interaction,
+                Some(Interaction::Freehand(_) | Interaction::Drawing { .. })
+            )
+        {
+            return Cursor::Hidden;
+        }
+        match cursor {
+            Cursor::Hidden | Cursor::Tool(_) if visible => {
+                Cursor::Shape(selection::CursorHint::Crosshair)
+            }
+            _ => cursor,
+        }
+    }
+
+    fn default_cursor(&self, point: Point, tool_override: ToolOverride) -> Cursor {
+        let effective_tool = tool_override.effective_tool(self.tool);
         if tool_override != ToolOverride::None && effective_tool == Tool::Eraser {
             return self.tool_cursor(effective_tool);
         }
@@ -426,6 +463,20 @@ impl Editor {
 
     pub(super) fn cancel_interaction(&mut self) -> bool {
         self.interaction.take().is_some()
+    }
+
+    pub(in crate::draw) fn finish_pointer_interaction(
+        &mut self,
+        point: Option<Point>,
+        modifiers: Modifiers,
+    ) -> bool {
+        if self.is_editing_text() || self.interaction.is_none() {
+            return false;
+        }
+        match point {
+            Some(point) => self.pointer_up(point, modifiers),
+            None => self.cancel_interaction(),
+        }
     }
 
     pub(super) fn finish_interaction(&mut self) -> bool {

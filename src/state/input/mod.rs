@@ -24,7 +24,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Keybo
 use super::State;
 use crate::OutputId;
 use crate::config::DrawOn;
-use crate::draw::{self, Action, Cursor, Modifiers, Point};
+use crate::draw::{self, Action, Modifiers, Point};
 use crate::tool::Tool;
 
 const MAX_PENDING_PEN_SAMPLES: usize = 64;
@@ -151,6 +151,28 @@ impl State {
         empty_region.destroy();
     }
 
+    pub(super) fn interrupt_pointer_gesture(&mut self) {
+        let was_grabbed = self.pointer.input_grab_active();
+        if was_grabbed {
+            self.flush_pen_motion();
+            let point = self
+                .pointer
+                .position()
+                .map(|(x, y)| Point::new(x as f32, y as f32));
+            if self
+                .draw
+                .finish_pointer_interaction(point, self.modifiers())
+            {
+                self.request_render();
+            }
+        }
+        self.pointer.cancel_gesture();
+        self.pending_pen_motion.reset(None);
+        if was_grabbed {
+            self.update_output_input();
+        }
+    }
+
     pub(super) fn apply_action(&mut self, action: Action) {
         self.flush_pen_motion();
         self.pointer.clear_released_pen_tip();
@@ -263,7 +285,12 @@ impl State {
     }
 
     pub(super) fn open_picker(&mut self, (x, y): (f64, f64)) {
-        self.draw.open_picker(Point::new(x as f32, y as f32));
+        self.flush_pen_motion();
+        let point = Point::new(x as f32, y as f32);
+        self.draw
+            .finish_pointer_interaction(Some(point), self.modifiers());
+        self.pending_pen_motion.reset(None);
+        self.draw.open_picker(point);
         self.request_render();
     }
 
@@ -322,8 +349,8 @@ impl State {
         };
         let point = Point::new(x as f32, y as f32);
         let cursor = self.draw.cursor(point, self.pointer.tool_override());
-        let preview_changed = self.draw.set_tool_cursor(match cursor {
-            Cursor::Tool(preview) if self.pointer.tool_cursor_supported() => {
+        let preview_changed = self.draw.set_tool_cursor(match cursor.tool() {
+            Some(preview) if self.pointer.tool_cursor_supported() => {
                 let point = if preview.tool == Tool::Pen {
                     self.pointer.released_pen_tip().unwrap_or(point)
                 } else {
