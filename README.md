@@ -12,7 +12,7 @@ Vellum requires a Wayland compositor that implements [`wlr-layer-shell`](https:/
 
 ## Installation
 
-### Home Manager
+### NixOS and Home Manager
 
 Add Vellum to your flake inputs:
 
@@ -20,11 +20,12 @@ Add Vellum to your flake inputs:
 inputs.vellum.url = "github:greyxp1/vellum";
 ```
 
-Then import the module in your Home Manager configuration:
+Import and enable the module in your NixOS or Home Manager configuration:
 
 ```nix
 {inputs, ...}: {
-  imports = [inputs.vellum.homeModules.default];
+  # Use homeModules.default for Home Manager.
+  imports = [inputs.vellum.nixosModules.default];
   services.vellum.enable = true;
 }
 ```

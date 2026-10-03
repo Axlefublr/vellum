@@ -10,22 +10,20 @@ in {
   imports = [(import ./options.nix {inherit self;})];
 
   config = lib.mkIf cfg.enable {
-    home.packages = [cfg.package];
-    xdg.configFile."vellum/config.toml" = lib.mkIf (cfg.settings != {}) {
+    environment.systemPackages = [cfg.package];
+    environment.etc."xdg/vellum/config.toml" = lib.mkIf (cfg.settings != {}) {
       source = tomlFormat.generate "vellum-config.toml" cfg.settings;
     };
     systemd.user.services.vellum = {
-      Unit = {
-        Description = "Vellum screen annotation overlay";
-        After = ["graphical-session.target"];
-        PartOf = ["graphical-session.target"];
-      };
-      Service = {
+      description = "Vellum screen annotation overlay";
+      after = ["graphical-session.target"];
+      partOf = ["graphical-session.target"];
+      wantedBy = ["graphical-session.target"];
+      serviceConfig = {
         Type = "exec";
         ExecStart = "${cfg.package}/bin/vellum";
         Restart = "on-failure";
       };
-      Install.WantedBy = ["graphical-session.target"];
     };
   };
 }
