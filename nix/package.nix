@@ -45,13 +45,6 @@ rustPlatform.buildRustPackage {
     wayland
   ];
 
-  env.RUSTFLAGS = "-C link-arg=-Wl,-rpath,${
-    lib.makeLibraryPath [
-      vulkan-loader
-      wayland
-    ]
-  }";
-
   postInstall = ''
     mapfile -d "" outputDirs < <(find "$tmpDir/build" -type d -path '*/build/vellum-*/out' \
       -exec test -f '{}/completions/vellum.bash' ';' -print0)
@@ -69,6 +62,11 @@ rustPlatform.buildRustPackage {
       $out/share/powershell/vellum.Completion.ps1
     install -Dm644 default-config.toml \
       $out/share/doc/vellum/default-config.toml
+  '';
+
+  postFixup = ''
+    # wgpu loads Vulkan dynamically, so its path must be added after RPATH shrinking.
+    patchelf --add-rpath "${lib.makeLibraryPath [vulkan-loader]}" "$out/bin/vellum"
   '';
 
   doInstallCheck = true;
